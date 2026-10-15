@@ -1,5 +1,5 @@
 // Personal-data detection presets (Malaysia-focused). Pure logic: regex + validators, no DOM.
-import type { SearchPattern } from './search';
+import type { PageText, SearchPattern } from './search';
 
 export interface Preset {
   id: string;
@@ -45,6 +45,59 @@ const lineOf = (m: RegExpExecArray, text: string) => {
   const b = text.indexOf('\n', m.index + m[0].length);
   return text.slice(a, b === -1 ? text.length : b);
 };
+type Accept = (m: RegExpExecArray, text: string, pt?: PageText) => boolean;
+
+/**
+ * Table layout: the label is a column header somewhere above the value (data rows in between).
+ * Only for a bare cell: if the value's own line has a "Something:" label before it, that label wins.
+ * Header lines have no digits; lines with digits are data rows and are climbed over.
+ */
+const columnHeader = (kw: RegExp, maxLines = 8): Accept => (m, text, pt) => {
+  if (!pt) return false;
+  const ls = text.lastIndexOf('\n', m.index - 1) + 1;
+  if (/[:：]/.test(text.slice(Math.max(ls, m.index - 40), m.index))) return false;
+  let vx0 = Infinity, vx1 = -Infinity, vy = Infinity;
+  for (let i = m.index; i < m.index + m[0].length; i++) {
+    const b = pt.boxes[i];
+    if (b) { vx0 = Math.min(vx0, b.x); vx1 = Math.max(vx1, b.x + b.w); vy = Math.min(vy, b.y); }
+  }
+  if (!Number.isFinite(vx0)) return false;
+  const re = new RegExp(kw.source, kw.flags.includes('g') ? kw.flags : kw.flags + 'g');
+  let start = ls;
+  for (let n = 0; n < maxLines && start > 0; n++) {
+    const end = start - 1;
+    start = text.lastIndexOf('\n', end - 1) + 1;
+    const line = text.slice(start, end);
+    if (/[:：]/.test(line)) return false; // "Label: value" lines make a form, not a table
+    if (/\d/.test(line)) continue;
+    re.lastIndex = 0;
+    let k: RegExpExecArray | null;
+    while ((k = re.exec(line))) {
+      let lx0 = Infinity, lx1 = -Infinity, ly = Infinity;
+      for (let i = start + k.index; i < start + k.index + k[0].length; i++) {
+        const b = pt.boxes[i];
+        if (b) { lx0 = Math.min(lx0, b.x); lx1 = Math.max(lx1, b.x + b.w); ly = Math.min(ly, b.y); }
+      }
+      // Aligned like a table column: left edges line up, right edges line up (numbers), or the value sits under the label.
+      const lw = lx1 - lx0, vc = (vx0 + vx1) / 2;
+      const aligned = (vx0 >= lx0 - 0.5 * lw && vx0 <= lx1) || Math.abs(vx1 - lx1) <= 0.5 * lw || (vc >= lx0 && vc <= lx1);
+      if (ly < vy && aligned) return true;
+      if (!k[0].length) re.lastIndex++;
+    }
+  }
+  return false;
+};
+
+/** Label on the same line (within n chars), on the line above, or as a column header (tables). */
+const labelled = (kw: RegExp, n = 60): Accept => {
+  const a = near(kw, n), b = columnHeader(kw);
+  return (m, text, pt) => a(m, text) || b(m, text, pt);
+};
+
+const BANK_KW = /bank|acc(?:oun)?t|acc?\.? ?no|a\/c|akaun/i;
+/** "Account No", "Acct No.", "A/C No", "No. Akaun", "Nombor Akaun", "Account Number". */
+const BANK_LABEL = /(?:acc(?:oun)?t\.?|a\/c)\s*(?:no\.?|number|num\.?|#)?|(?:no\.?|nombor|nombor)\s*akaun(?:\s*bank)?/;
+const TIN_KW = /\bTIN\b|tax\s*(?:identification|id|ref(?:erence)?|file|no)|income\s*tax|cukai|LHDN|IRBM|hasil|e-?invoice/i;
 const COMPANY_CTX = /\b(?:sdn\.?\s*bhd|berhad|bhd|plt|llp|ssm|syarikat|company|co\.?\s*reg|registration|pendaftaran\s+syarikat|roc|rob)\b/i;
 const IC_CTX = /\b(?:nric|n\.?r\.?i\.?c|i\/?c|mykad|my\s*kad|k\/p|kp|kad\s+pengenalan|identity\s+card|id\s*no)\b/i;
 const NEW_SSM = /^(?:19|20)\d{2}0[1-6]\d{6}$/;
@@ -65,12 +118,48 @@ const NOT_PERSON_WORD = /\b(?:SDN|BHD|BERHAD|ENTERPRISE|TRADING|BANK|LTD|PLT|LLP
 const esc = (w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const labelRe = NAME_LABELS.map((l) => ci(esc(l)).replace(/ /g, '\\s+')).join('|');
 const honorRe = HONORIFICS.map((h) => ci(esc(h)).replace(/ /g, '\\s+')).join('|');
+/** Words that show a "name" is really a form caption or sentence ("Name of applicant", "Nama penuh seperti dalam IC"). */
+const NAME_STOP = /^(?:of|the|and|for|to|in|on|at|by|as|per|shall|will|must|is|are|details?|information|info|address|alamat|number|nombor|no|date|tarikh|signature|tandatangan|butiran|maklumat|card|kad|ic|nric|passport|pasport|account|akaun|phone|telefon|email|e-mail|list|senarai|form|borang|section|bahagian|field|here|below|above|page|title|position|jawatan|company|syarikat|bank|seperti|dalam|yang|dan|atau|please|sila|refer|see|n\/a|nil|tiada|not|none)$/i;
+const nameWordsOk = (v: string) => {
+  const ws = v.split(/[\s]+/).filter(Boolean);
+  return ws.length > 0 && !NAME_STOP.test(ws[0]) && ws.filter((w) => NAME_STOP.test(w)).length <= (ws.length > 3 ? 1 : 0);
+};
 const nameOk = (m: RegExpExecArray, text: string) => {
-  if (NOT_PERSON_WORD.test(m[0])) return false;
+  if (NOT_PERSON_WORD.test(m[0]) || !nameWordsOk(m[0])) return false;
   const before = text.slice(text.lastIndexOf('\n', m.index - 1) + 1, m.index);
   // "Bank name:", "Company name:" label something that isn't a person.
   return !NOT_PERSON_LABEL.test(before.replace(/\b(?:name|nama)\b\.?\s*[:：-]?\s*$/i, '').trimEnd());
 };
+
+/** Malaysian Chinese surnames (romanised) and common given-name syllables: "TAN WEI MING", "Lim Siew Ling". */
+const CN_SURNAMES = ['Tan', 'Lim', 'Lee', 'Ng', 'Wong', 'Ong', 'Chan', 'Chong', 'Goh', 'Teh', 'Yap', 'Low', 'Ho', 'Ooi', 'Khoo', 'Leong',
+  'Cheah', 'Chin', 'Choo', 'Chua', 'Foo', 'Koh', 'Kok', 'Lai', 'Lau', 'Liew', 'Loh', 'Mak', 'Pang', 'Phang', 'Poh', 'Quek', 'Seah', 'See',
+  'Sim', 'Siow', 'Soh', 'Tay', 'Tee', 'Toh', 'Wee', 'Woo', 'Yeo', 'Yeoh', 'Yong', 'Chew', 'Heng', 'Hew', 'Kang', 'Khor', 'Kwan', 'Lam',
+  'Liang', 'Liow', 'Loke', 'Ling', 'Thong', 'Ting', 'Yee', 'Yip', 'Cheng', 'Chai', 'Choong', 'Chuah', 'Gan', 'Hii', 'Kan', 'Kuan', 'Lew',
+  'Loo', 'Lum', 'Sia', 'Siew', 'Tang', 'Tiong', 'Voon', 'Wu', 'Yeap', 'Yew', 'Ang', 'Au', 'Beh', 'Chee', 'Chiew', 'Chow', 'Fong', 'Hoo',
+  'Hor', 'Kee', 'Koay', 'Kong', 'Ku', 'Kwok', 'Leow', 'Lian', 'Liu', 'Lo', 'Mok', 'Neoh', 'Oon', 'Pua', 'Saw', 'Sin', 'Soo', 'Soon', 'Tai',
+  'Tham', 'Thor', 'Tiew', 'Ung', 'Wan', 'Wang', 'Yam', 'Yau', 'Yu', 'Zhang', 'Chen', 'Huang', 'Lin', 'Zhou', 'Xu', 'Sun', 'Ma', 'Hu', 'Guo', 'He'];
+const CN_GIVEN = ['Wei', 'Ming', 'Kok', 'Keong', 'Siew', 'Mei', 'Ling', 'Hui', 'Yee', 'Kah', 'Chee', 'Boon', 'Hock', 'Seng', 'Choon', 'Wai',
+  'Kit', 'Yong', 'Jun', 'Jia', 'Xin', 'Yi', 'Hao', 'Zhi', 'Kai', 'Hong', 'Kian', 'Soon', 'Huat', 'Leng', 'Lian', 'Peng', 'Ping', 'Fong',
+  'Kheng', 'Teck', 'Beng', 'Eng', 'Guan', 'Heng', 'Hin', 'Hoe', 'Hoong', 'Hwa', 'Jin', 'Kean', 'Keat', 'Khai', 'Kim', 'Kin', 'Kuan', 'Lai',
+  'Lee', 'Lip', 'Loong', 'Meng', 'Min', 'Nam', 'Ngee', 'Pei', 'Pui', 'Qi', 'Sheng', 'Shi', 'Sin', 'Siang', 'Siong', 'Soo', 'Tat', 'Tian',
+  'Ting', 'Tong', 'Wah', 'Weng', 'Wen', 'Yan', 'Yang', 'Yau', 'Yen', 'Yew', 'Yik', 'Yin', 'Yit', 'Yoke', 'Yu', 'Yuan', 'Yun', 'Zi', 'Chun',
+  'Chong', 'Fatt', 'Foo', 'Fook', 'Hean', 'Hooi', 'Kee', 'Keng', 'Kong', 'Lan', 'Leong', 'Li', 'Lin', 'Liang', 'Mun', 'Ning', 'San', 'Shan',
+  'Sze', 'Tze', 'Wan', 'Wing', 'Xiang', 'Ying', 'Ah', 'Kow', 'Seong', 'Sen', 'Kon', 'Swee', 'Chin', 'Choy', 'Fei', 'Hoi', 'Kwong', 'Mooi',
+  'Poh', 'Sai', 'Shin', 'Tuck', 'Voon', 'Wing', 'Yeong', 'Yoong', 'Zhen', 'Jie', 'Jing', 'Qian', 'Rui', 'Xuan', 'Yao', 'En', 'Er', 'Huey'];
+/** Malay/Muslim name anchors: a name usually starts with one of these. */
+const MY_ANCHORS = ['Muhammad', 'Muhamad', 'Mohammad', 'Mohamad', 'Mohamed', 'Mohd', 'Muhd', 'Md', 'Ahmad', 'Abdul', 'Abd', 'Nur', 'Nurul',
+  'Nor', 'Noor', 'Siti', 'Nik', 'Megat', 'Syed', 'Sharifah', 'Syarifah', 'Puteri', 'Wan', 'Fatimah', 'Aminah', 'Aishah', 'Aisyah', 'Zainab',
+  'Nurin', 'Nurhayati', 'Norazlina', 'Norhayati', 'Mohd.', 'Ahmad'];
+const alt = (ws: string[], caps: boolean) => [...new Set(ws)].map((w) => esc(caps ? w.toUpperCase() : w)).join('|');
+const cnName = (caps: boolean) => `(?:${alt(CN_SURNAMES, caps)})(?:[ -](?:${alt(CN_GIVEN, caps)})(?![\\p{L}])){1,2}`;
+/** Words before a Malay anchor that make it a place or institution, not a person ("Jalan Raja Muda", "Masjid Abdul..."). */
+const NOT_PERSON_BEFORE = /\b(?:jalan|jln|lorong|lrg|taman|tmn|masjid|sekolah|sk|smk|kolej|universiti|university|hospital|klinik|bangunan|wisma|menara|kampung|kg|persiaran|lebuh|surau|dewan|institut|pusat|stadium|bandar|pekan)\b(?:[ ]+[A-Z][\w'’.]*){0,3}[ ]*$/i;
+const personOk = (m: RegExpExecArray, text: string) => nameOk(m, text) && !NOT_PERSON_BEFORE.test(text.slice(Math.max(0, m.index - 30), m.index));
+
+/** ID cards (MyKad and family): card words anywhere on the page. */
+const CARD_CTX = /kad\s*pengenalan|my\s?kad|identity\s*card|warganegara|\bmy(?:pr|kas|kid|tentera)\b/i;
+const CARD_NAME_LINE = `[A-Z][A-Z'’.@/-]*(?:[ ]+[A-Z][A-Z'’.@/-]*){1,6}`;
 
 // ---- Addresses (Malaysia) ----
 const ADDR_KW = ['jalan', 'jln', 'lorong', 'lrg', 'taman', 'tmn', 'persiaran', 'lebuh', 'lebuhraya', 'lingkaran', 'kampung', 'kg', 'batu',
@@ -169,22 +258,28 @@ export const PRESETS: Preset[] = [
     }],
   },
   {
-    id: 'bank', label: 'Bank account', description: '10–16 digits after “account / akaun / a/c / bank”', defaultOn: true,
-    patterns: [{
-      regex: /(?<![\d-])\d{2,6}(?:[ -]?\d{2,8}){0,4}(?![\d-])/g,
-      accept: (m, t) => { const n = digits(m[0]).length; return n >= 10 && n <= 16 && near(/bank|acc(?:oun)?t|acc?\.? ?no|a\/c|akaun/i)(m, t); },
-    }],
+    id: 'bank', label: 'Bank account', description: '8–17 digits after or under “Account No. / No. Akaun / A/C / bank”', defaultOn: true,
+    patterns: [
+      {
+        // Groups joined by one consistent separator, so a table row "880808-08-8888 7612345678" splits into two values.
+        regex: /(?<![\d-])\d{1,6}(?:([ -]?)\d{1,8}(?:\1\d{1,8}){0,4})?(?![\d-])/g,
+        accept: (m, t, pt) => { const n = digits(m[0]).length; return n >= 8 && n <= 17 && labelled(BANK_KW)(m, t, pt); },
+      },
+      // "Account No.: <value>": whatever account-like value follows the label (letters + digits too, e.g. "ACC-00012345678").
+      { regex: new RegExp(`(?<=(?:${BANK_LABEL.source})[ \\t]*[:：#][ \\t]*)[A-Z]{0,4}[ -]?\\d[\\d -]{4,28}\\d`, 'gi'),
+        accept: (m) => digits(m[0]).length >= 6 },
+    ],
   },
   {
     id: 'passport', label: 'Passport', description: 'A12345678 / H… / K…, or ID after “passport”', defaultOn: true,
     patterns: [
       { regex: /(?<![A-Za-z0-9])[AHK]\d{8}(?![A-Za-z0-9])/g },
-      { regex: /(?<![A-Za-z0-9])[A-Z]{1,2}\d{6,8}(?![A-Za-z0-9])/g, accept: near(/pass?port/i) },
+      { regex: /(?<![A-Za-z0-9])[A-Z]{1,2}\d{6,8}(?![A-Za-z0-9])/g, accept: labelled(/pass?port|pasport/i) },
     ],
   },
   {
     id: 'dob', label: 'Date of birth', description: 'Dates after “birth / DOB / lahir”', defaultOn: true,
-    patterns: [{ regex: new RegExp(`(?<!\\d)${DATE}(?!\\d)`, 'gi'), accept: near(/birth|\bD\.?O\.?B\b|lahir/i) }],
+    patterns: [{ regex: new RegExp(`(?<!\\d)${DATE}(?!\\d)`, 'gi'), accept: labelled(/birth|\bD\.?O\.?B\b|lahir/i) }],
   },
   {
     id: 'company', label: 'Company reg. no.', description: 'SSM 202001012345, 1234567-K, LLP0012345-LGN', defaultOn: true,
@@ -195,11 +290,41 @@ export const PRESETS: Preset[] = [
     ],
   },
   {
-    id: 'name', label: 'Name', description: 'Only after “Name:”, “Holder:”, “Tenant:”…, titles (Encik, Puan, Mr…) or bin/binti', defaultOn: true,
+    id: 'tin', label: 'Tax no. (TIN)', description: 'LHDN TIN: IG/SG/OG + 9–11 digits; C, D, E, F, PT, TA… numbers next to “TIN / No. Cukai / Income tax”', defaultOn: true,
+    patterns: [
+      { regex: /(?<![A-Za-z0-9])(?:IG|SG|OG)[ -]?\d{9,11}(?![A-Za-z0-9])/g },
+      { regex: /(?<![A-Za-z0-9])(?:CS|FA|PT|TA|TC|TN|TR|TP|LE|C|D|E|F|J)[ -]?\d{8,11}(?![A-Za-z0-9])/g, accept: labelled(TIN_KW, 60) },
+      // "TIN: …" / "No. Cukai Pendapatan: …": any number in TIN shape after the label (incl. an IC number used as TIN).
+      { regex: new RegExp(`(?<=(?:${TIN_KW.source})[^\\n:：]{0,25}[:：][ \\t]*)(?:[A-Z]{1,2}[ -]?)?\\d[\\d -]{7,14}\\d`, 'gi') },
+    ],
+  },
+  {
+    id: 'name', label: 'Name', description: 'After “Name:”, “Nama”, “Holder:”…, in a Name column, titles (Encik, Puan, Mr…), bin/binti, common Malaysian names, and on ID cards', defaultOn: true,
     patterns: [
       { regex: new RegExp(`(?<=(?:^|[^\\p{L}])(?:${labelRe})\\s*[:：-]\\s*)${NAME}`, 'gu'), accept: nameOk },
+      // Labelled with a colon: the whole value up to the next label or line end, in any letter case ("Name: tan wei ming").
+      { regex: new RegExp(`(?<=(?:^|[^\\p{L}])(?:${labelRe})[ \\t]*[:：][ \\t]*)\\p{L}[\\p{L}'’.@/ -]{1,58}?(?=[ \\t]*(?:\\n|$|[,;(]|\\s{2,}|[ \\t]+\\p{L}[\\p{L} .\\/]{0,24}[:：]|[ \\t]+\\d))`, 'gu'),
+        accept: (m, t) => /\p{L}{2}/u.test(m[0]) && nameOk(m, t) },
+      // Label at the start of a line without a colon: "NAME   YAP KON SEN", "Nama Siti Aminah".
+      { regex: new RegExp(`(?<=(?:^|\\n)[ \\t]*(?:${labelRe})[ \\t]+)${NAME}`, 'gu'), accept: nameOk },
+      // Table: a name cell under a "Name"/"Nama" column header.
+      { regex: new RegExp(`(?<![\\p{L}])${NAME}(?![\\p{L}])`, 'gu'),
+        accept: (m, t, pt) => nameOk(m, t) && columnHeader(/\b(?:name|nama|full\s+name|nama\s+penuh|holder|pemegang)\b/i)(m, t, pt) },
+      // Common Malaysian names, no label needed: Chinese surname + given names, Malay anchor names.
+      { regex: new RegExp(`(?<![\\p{L}])(?:${cnName(true)}|${cnName(false)})(?![\\p{L}])`, 'gu'),
+        accept: (m, t) => nameOk(m, t) && !/^(?:tan|puan)\s+sri\b/i.test(m[0]) && !/\b(?:tan|puan)\s*$/i.test(t.slice(Math.max(0, m.index - 6), m.index)) },
+      { regex: new RegExp(`(?<![\\p{L}])(?:${alt(MY_ANCHORS, true)}|${alt(MY_ANCHORS, false)})(?:[ ]+${NAME_WORD}){1,4}(?![\\p{L}])`, 'gu'), accept: personOk },
+      // ID card: the name lines right under the IC number.
+      { regex: new RegExp(`(?<=(?:^|\\n)[^\\n]*\\d{6}-?\\d{2}-?\\d{4}[^\\n]*\\n(?:[^\\n]{0,3}\\n)?)${CARD_NAME_LINE}(?:\\n${CARD_NAME_LINE})?`, 'gu'),
+        accept: (m, t) => CARD_CTX.test(t) && nameWordsOk(m[0]) && !NOT_PERSON_WORD.test(m[0]),
+        refine: (m) => {
+          // A second line belongs to the name only if it doesn't look like the address starting.
+          const [l1, l2] = m[0].split('\n');
+          const keep2 = l2 && !/\d/.test(l2) && !STRICT_KW_RE.test(l2) && !stateRe.test(l2) && !CARD_CTX.test(l2);
+          return { start: m.index, end: m.index + (keep2 ? m[0].length : l1.length) };
+        } },
       { regex: new RegExp(`(?<=(?:^|[^\\p{L}])(?:${honorRe})\\.?\\s+)${NAME}`, 'gu'), accept: nameOk },
-      { regex: new RegExp(`(?<![\\p{L}])${NAME_WORD}(?:[ ]+${NAME_WORD}){0,3}[ ]+(?:${ci('binti')}|${ci('bin')}|${ci('bte')}|${ci('a')}\\/${ci('l')}|${ci('a')}\\/${ci('p')})[ ]+${NAME_WORD}(?:[ ]+${NAME_WORD}){0,3}`, 'gu'), accept: nameOk },
+      { regex: new RegExp(`(?<![\\p{L}])${NAME_WORD}(?:[ ]+${NAME_WORD}){0,3}[ ]+(?:${ci('binti')}|${ci('bin')}|${ci('bte')}|${ci('a')}\\/${ci('l')}|${ci('a')}\\/${ci('p')}|${ci('s')}\\/${ci('o')}|${ci('d')}\\/${ci('o')})[ ]+${NAME_WORD}(?:[ ]+${NAME_WORD}){0,3}`, 'gu'), accept: nameOk },
     ],
   },
   {

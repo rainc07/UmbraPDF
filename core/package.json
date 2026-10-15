@@ -1,13 +1,13 @@
 {
   "name": "umbra-core",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "private": true,
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/copy-vendor.mjs",
-    "test": "node tests/e2e.mjs",
+    "test": "node tests/e2e.mjs && node tests/ui.mjs",
     "sync:android": "node scripts/sync-android.mjs",
     "build:android": "npm run build && npm run sync:android"
   },

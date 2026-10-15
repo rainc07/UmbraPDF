@@ -8,7 +8,8 @@ Tap **Open** at the top, or **Open a PDF** on the start screen. You can also use
 ## 2. Redact by hand
 - Pick **Redact** in the bottom bar, then drag a box over anything you want hidden.
 - Tap a box to select it, then tap **×** to remove it. **Undo** reverts your last step.
-- Switch to **Scroll** to move around the page without drawing. Use **−** / **+** to zoom.
+- Switch to **Scroll** to move around the page without drawing.
+- **Zoom:** pinch with two fingers (works in Redact mode too; two fingers never draw a box), double-tap to switch between fit-to-width and close-up, or use **−** / **+**. On a computer, Ctrl + mouse wheel or a trackpad pinch also zoom.
 
 ## 3. Find & redact (search)
 Tap **Find**, type a word or phrase, and tap **Find**.
@@ -28,14 +29,17 @@ Tap **Auto Detect**, then **Scan document** at the top. **Advanced config** (col
 | Phone | +60 12-345 6789, 012-3456789, 03-2161 2345 |
 | Email | name@example.com |
 | Card number | 13–19 digits, checked with the Luhn checksum |
-| Bank account | 10–16 digits, only when labelled "account", "akaun", "a/c" or "bank" |
-| Passport | A12345678 / H… / K…, or any ID labelled "passport" |
-| Date of birth | dates labelled "birth", "DOB" or "lahir" |
+| Bank account | 8–17 digits labelled "Account No.", "No. Akaun", "A/C", "akaun" or "bank": on the same line, on the line above, or as the column header of a table. After "Account No.:" any account-like value is taken, e.g. ACC-00012345678 |
+| Passport | A12345678 / H… / K…, or any ID labelled "passport" (also as a table column) |
+| Date of birth | dates labelled "birth", "DOB" or "lahir" (also as a table column) |
 | Company reg. no. | 202001012345, 1234567-K, LLP0012345-LGN (a 12-digit number next to "Sdn Bhd / SSM / company" counts as a company number, next to "IC / NRIC / MyKad" as an NRIC) |
-| Name | only after a label ("Name:", "Nama:", "Holder:", "Tenant:", "Landlord:", "Penyewa:"…), a title (Encik, Puan, Cik, Mr, Mrs, Dr, Dato'…) or with bin/binti/a/l/a/p. "Bank name:" or "Company name:" are ignored |
-| Address | after "Address:" / "Alamat:" / "Premises:", or street lines (Jalan, Taman, Lorong…) ending with a postcode and town, e.g. 52100 Kepong, KL |
+| Tax no. (TIN) | LHDN numbers: IG12345678090 (also old SG/OG). Organisation numbers (C, D, E, F, PT, TA…) when labelled "TIN", "No. Cukai", "Income tax" or "LHDN" |
+| Name | after a label, with or without a colon ("Name:", "NAME  …", "Nama Pemegang Akaun:", "Holder:", "Tenant:"…; after a colon in any letter case), under a "Name"/"Nama" table column, after a title (Encik, Puan, Mr, Dr, Dato'…), with bin/binti/a/l/a/p/s/o/d/o, common Malaysian names without any label (e.g. Tan Kok Keong, Mohd Azman Ismail), and the name line on an IC. "Bank name:", "Company name:" and street names (Jalan Raja Muda…) are ignored |
+| Address | after "Address:" / "Alamat:" / "Premises:", or street lines (Jalan, Taman, Lorong…) ending with a postcode and town, e.g. 52100 Kepong, KL, including the address block on an IC |
 | Vehicle plate (off by default) | WXY 1234, VAB 123 C. Never amounts like RM 2700. By default only next to a label like "vehicle", "kenderaan" or "plate" (see Settings) |
 | Custom pattern | your own regular expression, e.g. `EMP-\d{5}` |
+
+**ID cards and other pictures:** scanned pages, photos and pictures pasted into a typed document (for example a copy of an IC in a Word file saved as PDF) are read with on-device OCR. Hard backgrounds such as the patterned print on a MyKad get a second, cleaned-up OCR pass. This takes a few extra seconds per picture.
 
 How the review works:
 - **Amber dashed box**: will be redacted.
@@ -47,7 +51,7 @@ How the review works:
 - The **By type** tab groups results (e.g. "Vehicle plate 3"). Tap a type to include or skip all of it, or **×** to remove it from the results.
 - On small screens, tap or drag the handle at the top of the panel (or its title) to shrink it to a bar and see more of the page.
 
-> Auto Detect is a helper, not a guarantee. Names without a label and unusual address layouts can be missed. Always look over every page before exporting, and use **Find** for anything it misses.
+> Auto Detect is a helper, not a guarantee. Uncommon names without a label, blurry photos and unusual address layouts can be missed. Always look over every page before exporting, and use **Find** for anything it misses.
 
 ## 5. Export a redacted copy
 Tap **Export** in the bottom bar. Your choices are remembered for next time. First pick a method:
@@ -62,7 +66,7 @@ Image only options:
 
 ### What happens when you save
 1. **Keep original text:** everything under each box is deleted from the PDF and a black box is drawn in its place; the file is then rebuilt from scratch without links, forms, attachments, scripts, hidden descriptions or file details. **Image only:** every page is turned into a picture with your black boxes burned in, and a brand-new PDF is built from those pictures.
-2. Umbra then checks the new file automatically: no copyable text under the boxes (or none at all, if searchable mode is off), no fonts except the plain one used for the searchable layer, no links, forms, attachments or extra file details, and OCR finds nothing readable inside the black boxes.
+2. Umbra then checks the new file automatically: no copyable text under the boxes (or none at all, if searchable mode is off), no fonts except the plain one used for the searchable layer, no links, forms, attachments or extra file details, and every black box is really solid black in the finished file (any box that isn't is read with OCR, and readable text there fails the check).
 3. If every check passes you'll see **Safe to share**, then **Save PDF** opens the system save dialog. If anything fails, Umbra **does not save** the file.
 
 ## 6. Going back

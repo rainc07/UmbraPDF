@@ -8,6 +8,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = vendorUrl('pdfjs/pdf.worker.min.mjs');
 export type { PDFDocumentProxy, PDFPageProxy };
 export const AnnotationMode = pdfjs.AnnotationMode;
 export const Util = pdfjs.Util;
+export const OPS = pdfjs.OPS;
 
 export class PasswordRequiredError extends Error {
   constructor(public readonly incorrect: boolean) { super(incorrect ? 'Incorrect password' : 'Password required'); }

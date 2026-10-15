@@ -40,7 +40,12 @@ export interface VerifyReport {
   annotations: number;
   catalogKeys: string[];   // risky catalog entries found (AcroForm, Names, Outlines, OpenAction...)
   metadataFields: string[];
-  ocr?: { checkedRegions: number; leaks: { page: number; text: string; confidence: number }[] };
+  ocr?: {
+    checkedRegions: number;
+    /** Regions proven safe by pixels alone (solid black: nothing readable can be there). */
+    solidRegions?: number;
+    leaks: { page: number; text: string; confidence: number }[];
+  };
   issues: string[];
   notes?: string[];        // non-blocking information (e.g. optional check unavailable)
 }

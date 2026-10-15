@@ -2,8 +2,8 @@
 // Text pages: pdf.js getTextContent + canvas measureText with the page's loaded font, scaled to item.width.
 // Image-only pages: OCR (tesseract) with glyph boxes.
 import type { TextItem, TextStyle } from 'pdfjs-dist/types/src/display/api';
-import { recognizeWords } from './ocr';
-import { renderToCanvas, Util, type PDFDocumentProxy, type PDFPageProxy } from './pdf';
+import { recognizeWordsRobust, type OcrWord } from './ocr';
+import { OPS, renderToCanvas, Util, type PDFDocumentProxy, type PDFPageProxy } from './pdf';
 import type { Rect } from './types';
 
 /** A page's text as one string, with a box (PDF points, displayed space, top-left origin) per character. */
@@ -21,8 +21,8 @@ export interface SearchPattern {
   id: string;
   label: string;
   regex: RegExp;
-  /** Extra validation (checksum, nearby keyword). `m.index` is relative to `text`. */
-  accept?: (m: RegExpExecArray, text: string) => boolean;
+  /** Extra validation (checksum, nearby keyword). `m.index` is relative to `text`; `pt` gives geometry (column headers). */
+  accept?: (m: RegExpExecArray, text: string, pt?: PageText) => boolean;
   /** Narrow (or reject with null) the matched range, e.g. trim a multi-line grab to the real address. */
   refine?: (m: RegExpExecArray, text: string) => { start: number; end: number } | null;
 }
@@ -142,34 +142,108 @@ async function textLayer(page: PDFPageProxy, index: number): Promise<PageText> {
   return { page: index, text: b.text, boxes: b.boxes, groups: b.groups, source: 'text' };
 }
 
-async function ocrLayer(page: PDFPageProxy, index: number, dpi: number, onStatus: (s: string) => void): Promise<PageText> {
+/** Append OCR words (canvas px at `scale`, offset by `off` points) to a builder as new lines. */
+function pushWords(b: Builder, words: OcrWord[], scale: number, off = { x: 0, y: 0 }, groupBase = 0, skip?: (r: Rect) => boolean) {
+  const toPt = (x0: number, y0: number, x1: number, y1: number): Rect =>
+    ({ x: off.x + x0 / scale, y: off.y + y0 / scale, w: (x1 - x0) / scale, h: (y1 - y0) / scale });
+  let line = -1;
+  for (const w of words) {
+    if (skip?.(toPt(w.x0, w.y0, w.x1, w.y1))) continue;
+    if (line !== -1 || b.text) b.sep(w.line !== line ? '\n' : ' ');
+    line = w.line;
+    const g = groupBase + w.line;
+    const glyphs = w.symbols.map((s) => s.text).join('');
+    if (glyphs === w.text) {
+      for (const s of w.symbols) for (const ch of s.text) b.push(ch, toPt(s.x0, w.y0, s.x1, w.y1), g);
+    } else {
+      const n = w.text.length, cw = (w.x1 - w.x0) / n;
+      for (let k = 0; k < n; k++) b.push(w.text[k], toPt(w.x0 + k * cw, w.y0, w.x0 + (k + 1) * cw, w.y1), g);
+    }
+  }
+}
+
+function ocrScale(page: PDFPageProxy, dpi: number): number {
   const base = page.getViewport({ scale: 1 });
   let scale = dpi / 72;
   const px = base.width * base.height * scale * scale;
   if (px > OCR_MAX_PIXELS) scale *= Math.sqrt(OCR_MAX_PIXELS / px);
+  return scale;
+}
+
+async function ocrLayer(page: PDFPageProxy, index: number, dpi: number, onStatus: (s: string) => void): Promise<PageText> {
+  const scale = ocrScale(page, dpi);
   const canvas = document.createElement('canvas');
   const b = new Builder();
   try {
     await renderToCanvas(page, canvas, scale);
-    const words = await recognizeWords(canvas, onStatus);
-    const toPt = (x0: number, y0: number, x1: number, y1: number): Rect =>
-      ({ x: x0 / scale, y: y0 / scale, w: (x1 - x0) / scale, h: (y1 - y0) / scale });
-    let line = -1;
-    for (const w of words) {
-      if (line !== -1) b.sep(w.line !== line ? '\n' : ' ');
-      line = w.line;
-      const glyphs = w.symbols.map((s) => s.text).join('');
-      if (glyphs === w.text) {
-        for (const s of w.symbols) for (const ch of s.text) b.push(ch, toPt(s.x0, w.y0, s.x1, w.y1), w.line);
-      } else {
-        const n = w.text.length, cw = (w.x1 - w.x0) / n;
-        for (let k = 0; k < n; k++) b.push(w.text[k], toPt(w.x0 + k * cw, w.y0, w.x0 + (k + 1) * cw, w.y1), w.line);
-      }
-    }
+    pushWords(b, await recognizeWordsRobust(canvas, onStatus), scale);
   } finally {
     canvas.width = canvas.height = 0;
   }
   return { page: index, text: b.text, boxes: b.boxes, groups: b.groups, source: 'ocr' };
+}
+
+/** Pictures big enough to hold readable text (e.g. a copy of an ID card pasted into a typed page). */
+const MIN_IMAGE_SIDE = 72;        // points (1 inch)
+const MIN_IMAGE_AREA = 0.03;      // of the page
+
+/** Where images are painted on the page (displayed space, points, top-left origin). */
+export async function imageRegions(page: PDFPageProxy): Promise<Rect[]> {
+  const vp = page.getViewport({ scale: 1 });
+  const ops = await page.getOperatorList();
+  type M = number[];
+  const mul = (m: M, n: M): M => Util.transform(m, n) as M;
+  let ctm: M = [1, 0, 0, 1, 0, 0];
+  const stack: M[] = [];
+  const out: Rect[] = [];
+  const IMG = new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageXObjectRepeat,
+    OPS.paintImageMaskXObject, OPS.paintImageMaskXObjectRepeat]);
+  for (let k = 0; k < ops.fnArray.length; k++) {
+    const fn = ops.fnArray[k], a = ops.argsArray[k] as unknown[];
+    if (fn === OPS.save) stack.push(ctm);
+    else if (fn === OPS.restore) ctm = stack.pop() ?? ctm;
+    else if (fn === OPS.transform) ctm = mul(ctm, a as M);
+    else if (fn === OPS.paintFormXObjectBegin) { stack.push(ctm); if (Array.isArray(a?.[0])) ctm = mul(ctm, a[0] as M); }
+    else if (fn === OPS.paintFormXObjectEnd) ctm = stack.pop() ?? ctm;
+    else if (IMG.has(fn)) {
+      const m = mul(vp.transform as M, ctm);
+      const pts: [number, number][] = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+      const r = aabb(pts);
+      const x0 = Math.max(0, r.x), y0 = Math.max(0, r.y), x1 = Math.min(vp.width, r.x + r.w), y1 = Math.min(vp.height, r.y + r.h);
+      if (x1 - x0 >= MIN_IMAGE_SIDE && y1 - y0 >= MIN_IMAGE_SIDE * 0.6 && (x1 - x0) * (y1 - y0) >= MIN_IMAGE_AREA * vp.width * vp.height) {
+        out.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+      }
+    }
+  }
+  // Drop images fully inside another (e.g. a soft mask drawn twice).
+  return out.filter((r, i) => !out.some((q, j) => j !== i && q.x <= r.x && q.y <= r.y && q.x + q.w >= r.x + r.w && q.y + q.h >= r.y + r.h && (j < i || q.w * q.h > r.w * r.h)));
+}
+
+/** A typed page with pictures: OCR each picture and add its words after the real text. */
+async function addImageText(page: PDFPageProxy, t: PageText, dpi: number, onStatus: (s: string) => void): Promise<PageText> {
+  const regions = await imageRegions(page);
+  if (!regions.length) return t;
+  const b = new Builder();
+  b.text = t.text; b.boxes = [...t.boxes]; b.groups = [...t.groups];
+  const scale = ocrScale(page, dpi);
+  const full = document.createElement('canvas');
+  const groupBase = Math.max(0, ...t.groups) + 1000;
+  // Skip OCR words that sit on real text already in the layer (a caption over a picture).
+  const onText = (r: Rect) => t.boxes.some((q) => q && r.x + r.w / 2 >= q.x && r.x + r.w / 2 <= q.x + q.w && r.y + r.h / 2 >= q.y && r.y + r.h / 2 <= q.y + q.h);
+  try {
+    await renderToCanvas(page, full, scale);
+    for (const [k, r] of regions.entries()) {
+      onStatus(`OCR: picture ${k + 1}/${regions.length}`);
+      const crop = document.createElement('canvas');
+      crop.width = Math.max(8, Math.round(r.w * scale)); crop.height = Math.max(8, Math.round(r.h * scale));
+      crop.getContext('2d')!.drawImage(full, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 0, 0, crop.width, crop.height);
+      try {
+        const words = await recognizeWordsRobust(crop, onStatus);
+        if (words.length) { b.sep('\n'); pushWords(b, words, scale, { x: r.x, y: r.y }, groupBase + k * 10000, onText); }
+      } finally { crop.width = crop.height = 0; }
+    }
+  } finally { full.width = full.height = 0; }
+  return { page: t.page, text: b.text, boxes: b.boxes, groups: b.groups, source: 'text' };
 }
 
 /** Extract one page's text + geometry, OCR-ing image-only pages when allowed. */
@@ -178,7 +252,8 @@ export async function extractPageText(doc: PDFDocumentProxy, index: number, opts
   const page = await doc.getPage(index + 1);
   if (o.ocr !== 'always') {
     const t = await textLayer(page, index);
-    if (o.ocr === 'never' || t.text.replace(/\s/g, '').length >= MIN_TEXT_CHARS) return t;
+    if (o.ocr === 'never') return t;
+    if (t.text.replace(/\s/g, '').length >= MIN_TEXT_CHARS) return addImageText(page, t, o.ocrDpi, o.onStatus ?? (() => {}));
   }
   return ocrLayer(page, index, o.ocrDpi, o.onStatus ?? (() => {}));
 }
@@ -232,7 +307,7 @@ export function findInPage(pt: PageText, p: Pick<SearchPattern, 'regex' | 'accep
   let m: RegExpExecArray | null;
   while ((m = re.exec(pt.text))) {
     if (!m[0].length) { re.lastIndex++; continue; }
-    if (p.accept && !p.accept(m, pt.text)) continue;
+    if (p.accept && !p.accept(m, pt.text, pt)) continue;
     let start = m.index, end = start + m[0].length;
     if (p.refine) {
       const r = p.refine(m, pt.text);

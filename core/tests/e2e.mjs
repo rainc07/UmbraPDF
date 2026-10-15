@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { drawCard, makeCardPdfs, CARD } from './fixtures-card.mjs';
 import { PDFDocument, StandardFonts, PDFName, PDFString, PDFOperator, PDFRawStream, PDFStream, PDFDict, decodePDFRawStream, degrees, rgb, pushGraphicsState, popGraphicsState, beginText, endText, setFontAndSize, setTextRenderingMode, moveText, showText, TextRenderingMode } from 'pdf-lib';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
@@ -262,6 +263,8 @@ const p2 = await page.evaluate(async ({ text, scan, presets, custom, partial }) 
   T.back(); out.afterBack3 = T.state();                            // Back dismisses the question, document stays
   const ex = await T.export({ dpi: 150 }, true);
   out.textReport = ex.report;
+  const vx = await T.export({}, true, 'vector');
+  out.vecCheck = { ocr: vx.report.ocr, ok: vx.report.ok, timings: vx.timings };
   const sx = await T.export({ dpi: 200, searchable: true }, false);
   out.textSReport = sx.report;
   out.textLayer = await T.text(sx.bytes);
@@ -312,6 +315,9 @@ check(p2.rescan === 0 && p2.boxesAfterRescan === p2.textBoxes.reduce((n, b) => n
 check(p2.dirty && !p2.afterBack1.panel && p2.afterBack2.modal && p2.afterBack2.hasDoc && !p2.afterBack3.modal && p2.afterBack3.hasDoc,
   `back: panel -> leave prompt (unsaved) -> dismiss ${JSON.stringify([p2.afterBack1, p2.afterBack2, p2.afterBack3])}`);
 check(p2.textHits.every((h) => h.on), 'detect: suggestions start selected, applied only via Apply');
+check(p2.textReport.ocr?.solidRegions === p2.textReport.ocr?.checkedRegions && p2.textReport.ocr.checkedRegions > 10, `speed: every black box proven solid by pixels, no OCR needed (image: ${p2.textReport.ocr?.solidRegions}/${p2.textReport.ocr?.checkedRegions})`);
+check(p2.vecCheck.ok && p2.vecCheck.ocr?.solidRegions === p2.vecCheck.ocr?.checkedRegions, `speed: same for Keep original text (${p2.vecCheck.ocr?.solidRegions}/${p2.vecCheck.ocr?.checkedRegions})`);
+console.log(`INFO  export timings (vector, ${p2.vecCheck.ocr?.checkedRegions} boxes): ${p2.vecCheck.timings.map(([n, ms]) => `${n} ${Math.round(ms)} ms`).join(', ')}`);
 check(p2.textReport.ok && p2.textReport.ocr?.leaks.length === 0, `detect (text): export verified clean, OCR check ${p2.textReport.ocr?.checkedRegions} regions: ${p2.textReport.issues.join('; ') || 'no issues'}`);
 check(p2.textSReport.ok, `detect (text): searchable export verified: ${p2.textSReport.issues.join('; ') || 'no issues'}`);
 const leaked = [...PII.map((x) => x[1]), '880202'].filter((v) => p2.textLayer.replace(/\s/g, '').includes(v.replace(/\s/g, '')));
@@ -428,6 +434,66 @@ check(V.size < V.imgSize / 3, `vector: much smaller than image export (${(V.size
   // A filled-in form field that is not under a box stays visible on the page (now as plain page content).
   check(/123-45-6789/.test(V.text), 'vector: visible (unredacted) form value is kept as page text, the form itself is removed');
   check(od.getTitle() === undefined && od.getAuthor() === undefined, 'vector: no Title/Author');
+}
+
+// ---------------- 1.1: TIN, stronger Name / Account No., tables, ID cards ----------------
+{
+  const ALL = ['nric', 'phone', 'email', 'card', 'bank', 'passport', 'dob', 'company', 'tin', 'name', 'address'];
+  const d = await PDFDocument.create();
+  const font = await d.embedFont(StandardFonts.Helvetica);
+  const p = d.addPage([612, 792]);
+  const put = (t, x, y) => p.drawText(t, { x, y, size: 10, font });
+  const want = [ // [value, label] that must be found with exactly this text
+    ['IG12345678090', 'TIN'], ['SG 10234567890', 'TIN'], ['C2584563202', 'TIN'], ['D4800990020', 'TIN'],
+    ['tan wei ming', 'Name'], ['LIM SIEW LING', 'Name'], ['Nurul Huda binti Hassan', 'Name'],
+    ['8001234567', 'Bank'], ['1-2345-6789-0', 'Bank'], ['ACC-00012345678', 'Bank'],
+    ['CHONG MEI LING', 'Name'], ['Muhammad Hafiz bin Ismail', 'Name'], ['Ravi Kumar s/o Subramaniam', 'Name'],
+    ['7612345678', 'Bank'], ['11223344556', 'Bank'], ['00998877665544', 'Bank'],
+    ['Tan Kok Keong', 'Name'], ['Mohd Azman Ismail', 'Name'],
+  ];
+  const decoys = ['Raja Muda Abdul Aziz', 'See Below Note', 'Tan Sri Example', 'INV-2024-0001', 'Name Of Applicant', 'Nama Penuh Seperti Dalam Kad'];
+  let y = 750;
+  for (const t of ['TIN: IG12345678090', 'No. Cukai Pendapatan: SG 10234567890', 'Company income tax no. C2584563202 (LHDN)', 'Partnership TIN D4800990020',
+    'Name: tan wei ming', 'NAME     LIM SIEW LING', 'Nama Pemegang Akaun: Nurul Huda binti Hassan', 'Account No.: 8001234567',
+    'No. Akaun: 1-2345-6789-0', 'Account No: ACC-00012345678', 'Please contact Tan Kok Keong for details.', 'Signed by Mohd Azman Ismail on behalf of the company.',
+    'Office: 8 Jalan Raja Muda Abdul Aziz, Kampung Baru', 'See Below Note', 'Tan Sri Example Foundation', 'Tax invoice no: INV-2024-0001',
+    'Name Of Applicant', 'Nama Penuh Seperti Dalam Kad']) { put(t, 72, y); y -= 18; }
+  // A table: header row, then data rows (no labels in the rows).
+  y -= 10;
+  const cols = [72, 100, 260, 360, 470];
+  ['No', 'Name', 'IC No.', 'Account No.', 'Branch'].forEach((h, k) => put(h, cols[k], y)); y -= 16;
+  for (const row of [['1', 'CHONG MEI LING', '880808-08-8888', '7612345678', 'Kepong'],
+    ['2', 'Muhammad Hafiz bin Ismail', '900202-10-1111', '11223344556', 'Ipoh'],
+    ['3', 'Ravi Kumar s/o Subramaniam', '850303-07-2222', '00998877665544', 'Klang']]) { row.forEach((c, k) => put(c, cols[k], y)); y -= 16; }
+  const img = await drawCard(page, CARD);
+  const cards = await makeCardPdfs(PDFDocument, StandardFonts, img);
+  const R = await page.evaluate(async ({ text, scan, mixed, ALL }) => {
+    const T = window.__umbraTest;
+    const strip = (hs) => hs.map(({ page, text, label }) => ({ page, text: text.replace(/\s+/g, ' ').trim(), label }));
+    await T.load(new Uint8Array(text));
+    const t = strip(await T.detect(ALL));
+    const out = { t };
+    for (const [k, b] of [['scan', scan], ['mixed', mixed]]) {
+      await T.load(new Uint8Array(b));
+      out[k] = strip(await T.detect(ALL));
+      T.applyAll();
+      const ex = await T.export({}, true, 'vector');
+      out[k + 'Report'] = ex.report;
+      out[k + 'Text'] = await T.text(ex.bytes);
+    }
+    return out;
+  }, { text: Array.from(await d.save()), scan: Array.from(cards.scan.bytes), mixed: Array.from(cards.mixed.bytes), ALL });
+  for (const [v, l] of want) check(R.t.some((h) => h.text === v && h.label.includes(l)), `1.1 detect: ${l} "${v}"${R.t.some((h) => h.text.includes(v)) ? '' : ' (not found)'} ${R.t.filter((h) => h.text.includes(v.split(' ')[0])).map((h) => `[${h.label}: ${h.text}]`).join(' ')}`);
+  const fp = R.t.filter((h) => decoys.some((x) => x.includes(h.text) || h.text.includes(x)));
+  check(fp.length === 0, `1.1 detect: decoys not flagged ${fp.map((h) => `${h.label}:${h.text}`).join(', ')}`);
+  for (const k of ['scan', 'mixed']) {
+    const hs = R[k];
+    check(hs.some((h) => h.label.includes('NRIC') && h.text === CARD.nric), `ID card (${k}): IC number found`);
+    check(hs.some((h) => h.label.includes('Name') && h.text === CARD.name.join(' ')), `ID card (${k}): name found ${hs.map((h) => `[${h.label}: ${h.text}]`).join(' ')}`);
+    check(hs.some((h) => h.label.includes('Address') && CARD.address.every((a) => h.text.includes(a))), `ID card (${k}): full address found`);
+    check(R[k + 'Report'].ok, `ID card (${k}): redacted export verified: ${R[k + 'Report'].issues.join('; ') || 'ok'}`);
+  }
+  check(/Salinan Kad Pengenalan/.test(R.mixedText) && !/TAN WEI MING|900101/.test(R.mixedText), 'ID card (mixed): typed text kept, card details gone from the exported text');
 }
 
 {

@@ -2,7 +2,7 @@ import './ui/styles.css';
 import {
   openPdf, closePdf, pageSizes, renderToCanvas, exportRedacted, verifyOutput, ocrRedactedRegions,
   PasswordRequiredError, DEFAULT_EXPORT,
-  PageTextCache, searchDocument, exportVector, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
+  PageTextCache, searchDocument, exportVector, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
   type Hit, type SearchPattern, type CustomPattern,
 } from './engine';
@@ -215,9 +215,11 @@ function buildPages() {
 }
 
 function layoutPages() {
+  viewer.style.setProperty('--z', String(S.zoom));
   viewer.querySelectorAll<HTMLElement>('.page').forEach((el, i) => {
-    el.style.width = `${S.sizes[i].width * S.zoom}px`;
-    el.style.height = `${S.sizes[i].height * S.zoom}px`;
+    // Sizes follow the --z variable, so a pinch only has to change one CSS property per frame.
+    el.style.width = `calc(var(--z) * ${S.sizes[i].width}px)`;
+    el.style.height = `calc(var(--z) * ${S.sizes[i].height}px)`;
     drawBoxes(i);
     io.unobserve(el);
     io.observe(el);
@@ -239,14 +241,105 @@ async function renderPage(i: number) {
   if (old) { old.replaceWith(tmp); old.width = old.height = 0; }
 }
 
-function setZoom(z: number) {
-  const anchor = viewer.scrollTop / Math.max(1, viewer.scrollHeight);
-  S.zoom = Math.min(4, Math.max(0.2, z));
+const ZMIN = 0.2, ZMAX = 4;
+const clampZoom = (z: number) => Math.min(ZMAX, Math.max(ZMIN, z));
+
+/** The page under a viewer-relative point, and that point in PDF points on the page. */
+function pointAt(cx: number, cy: number): { i: number; x: number; y: number } | null {
+  const pages = [...viewer.querySelectorAll<HTMLElement>('.page')];
+  if (!pages.length) return null;
+  let best = pages[0], bd = Infinity;
+  for (const el of pages) {
+    const b = el.getBoundingClientRect();
+    const d = cy < b.top ? b.top - cy : cy > b.bottom ? cy - b.bottom : 0;
+    if (d < bd) { bd = d; best = el; }
+    if (d === 0) break;
+  }
+  const b = best.getBoundingClientRect();
+  return { i: Number(best.dataset.i), x: (cx - b.left) / S.zoom, y: (cy - b.top) / S.zoom };
+}
+
+/** Scroll so PDF point `a` (on page a.i) sits under client point (cx, cy). */
+function scrollTo(a: { i: number; x: number; y: number }, cx: number, cy: number) {
+  const el = viewer.querySelector<HTMLElement>(`.page[data-i="${a.i}"]`);
+  if (!el) return;
+  const b = el.getBoundingClientRect();
+  viewer.scrollLeft += b.left + a.x * S.zoom - cx;
+  viewer.scrollTop += b.top + a.y * S.zoom - cy;
+}
+
+/** Live zoom (no re-render): CSS stretches the current canvases. Keeps `focus` (client px) fixed if given. */
+function previewZoom(z: number, focus?: { cx: number; cy: number }, anchor?: { i: number; x: number; y: number } | null) {
+  const f = focus ?? (() => { const v = viewer.getBoundingClientRect(); return { cx: v.left + v.width / 2, cy: v.top + v.height / 3 }; })();
+  const a = anchor ?? pointAt(f.cx, f.cy);
+  S.zoom = clampZoom(z);
+  viewer.style.setProperty('--z', String(S.zoom));
+  if (a) scrollTo(a, f.cx, f.cy);
+}
+
+/** Re-render pages sharply at the current zoom. */
+function commitZoom() {
   S.rendered.clear();
   S.gen++;
   layoutPages();
-  viewer.scrollTop = anchor * viewer.scrollHeight;
 }
+
+function setZoom(z: number, focus?: { cx: number; cy: number }) {
+  previewZoom(z, focus);
+  commitZoom();
+}
+
+// ---------- Pinch / double-tap / ctrl+wheel zoom ----------
+const pinch = { active: false, d0: 1, z0: 1, anchor: null as { i: number; x: number; y: number } | null };
+let commitTimer = 0;
+const mid = (t: TouchList) => ({ cx: (t[0].clientX + t[1].clientX) / 2, cy: (t[0].clientY + t[1].clientY) / 2 });
+const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY) || 1;
+
+viewer.addEventListener('touchstart', (e) => {
+  if (!S.doc || e.touches.length !== 2) return;
+  e.preventDefault(); // two fingers: ours, not the browser's scroll
+  const m = mid(e.touches);
+  Object.assign(pinch, { active: true, d0: dist(e.touches), z0: S.zoom, anchor: pointAt(m.cx, m.cy) });
+  cancelDraft();
+}, { passive: false });
+viewer.addEventListener('touchmove', (e) => {
+  if (!pinch.active || e.touches.length < 2) return;
+  e.preventDefault();
+  previewZoom(pinch.z0 * dist(e.touches) / pinch.d0, mid(e.touches), pinch.anchor); // also pans with the fingers
+}, { passive: false });
+const pinchEnd = (e: TouchEvent) => {
+  if (!pinch.active || e.touches.length >= 2) return;
+  pinch.active = false;
+  pinchUntil = performance.now() + 250; // ignore the lifting finger as a tap/draw
+  commitZoom();
+};
+viewer.addEventListener('touchend', pinchEnd);
+viewer.addEventListener('touchcancel', pinchEnd);
+
+// Double-tap: fit width <-> 2.5x, centred on the tap.
+let lastTap = { t: 0, x: 0, y: 0 };
+let pinchUntil = 0;
+viewer.addEventListener('pointerdown', (e) => { (viewer as HTMLElement & { _down?: { t: number; x: number; y: number } })._down = { t: performance.now(), x: e.clientX, y: e.clientY }; });
+viewer.addEventListener('pointerup', (e) => {
+  const d = (viewer as HTMLElement & { _down?: { t: number; x: number; y: number } })._down;
+  const now = performance.now();
+  if (!S.doc || pinch.active || now < pinchUntil || !d || now - d.t > 250 || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 10) return;
+  if ((e.target as HTMLElement).closest('.box, .sugg, button')) { lastTap.t = 0; return; }
+  if (now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 30) {
+    lastTap.t = 0;
+    const fit = fitZoom();
+    setZoom(S.zoom > fit * 1.6 ? fit : Math.min(ZMAX, fit * 2.5), { cx: e.clientX, cy: e.clientY });
+  } else lastTap = { t: now, x: e.clientX, y: e.clientY };
+});
+
+// Trackpad pinch / Ctrl+wheel on desktop.
+viewer.addEventListener('wheel', (e) => {
+  if (!S.doc || !e.ctrlKey) return;
+  e.preventDefault();
+  previewZoom(S.zoom * Math.exp(-e.deltaY / 300), { cx: e.clientX, cy: e.clientY });
+  clearTimeout(commitTimer);
+  commitTimer = window.setTimeout(commitZoom, 180);
+}, { passive: false });
 
 // ---------- Boxes ----------
 function drawBoxes(i: number) {
@@ -277,9 +370,8 @@ function drawBoxes(i: number) {
 }
 
 function place(el: HTMLElement, r: Rect) {
-  Object.assign(el.style, {
-    left: `${r.x * S.zoom}px`, top: `${r.y * S.zoom}px`, width: `${r.w * S.zoom}px`, height: `${r.h * S.zoom}px`,
-  });
+  const c = (v: number) => `calc(var(--z) * ${v}px)`;
+  Object.assign(el.style, { left: c(r.x), top: c(r.y), width: c(r.w), height: c(r.h) });
 }
 
 function select(sel: typeof S.sel) {
@@ -339,6 +431,9 @@ function undo() {
   }
 }
 
+/** Set by the overlay that is drawing; a second finger (pinch) discards the box being drawn. */
+let cancelDraft: () => void = () => {};
+
 function bindOverlay(ov: HTMLElement, page: number) {
   let start: { x: number; y: number } | null = null;
   let draft: HTMLElement | null = null;
@@ -360,8 +455,9 @@ function bindOverlay(ov: HTMLElement, page: number) {
     const box = t.closest<HTMLElement>('.box');
     if (box) { select({ page, idx: Number(box.dataset.idx) }); return; }
     if (S.sel) select(null);
-    if (S.mode !== 'draw' || S.busy || e.button > 0) return;
+    if (S.mode !== 'draw' || S.busy || e.button > 0 || pinch.active || !e.isPrimary) return;
     ov.setPointerCapture(e.pointerId);
+    cancelDraft = () => { draft?.remove(); start = draft = null; };
     start = pt(e);
     draft = document.createElement('div');
     draft.className = 'box draft';
@@ -387,10 +483,16 @@ type ThemePref = 'system' | 'light' | 'dark';
 interface ExportPrefs { dpi: number; format: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
 interface Options { hideRecents: boolean; platesLabelled: boolean; confirmLeave: boolean; closeAfterRedact: boolean; reviewReminder: boolean }
 const DEFAULT_OPTIONS: Options = { hideRecents: false, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
-interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[] }; export: ExportPrefs; opts: Options }
+interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[] }; export: ExportPrefs; opts: Options }
+/** Detectors added in an update start switched on (if on by default) for people with saved settings too. */
+function withNewPresets(d: Prefs['detect']): Prefs['detect'] {
+  const known = d.known ?? ['nric', 'phone', 'email', 'card', 'bank', 'passport', 'dob', 'company', 'name', 'address', 'plate']; // 1.0.0 set
+  const added = PRESETS.filter((p) => !known.includes(p.id) && p.defaultOn && !d.enabled.includes(p.id)).map((p) => p.id);
+  return { ...d, enabled: [...d.enabled, ...added], known: PRESETS.map((p) => p.id) };
+}
 function loadPrefs(): Prefs {
   const d: Prefs = {
-    theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [] },
+    theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id) },
     export: { dpi: DEFAULT_EXPORT.dpi, format: DEFAULT_EXPORT.format, searchable: true, method: 'vector' },
     opts: { ...DEFAULT_OPTIONS },
   };
@@ -406,7 +508,7 @@ function loadPrefs(): Prefs {
         for (const k of Object.keys(o) as (keyof Options)[]) if (typeof raw[k] === 'boolean') o[k] = raw[k] as boolean;
         return o;
       })(),
-      detect: v.detect && Array.isArray(v.detect.enabled) && Array.isArray(v.detect.custom) ? v.detect : d.detect,
+      detect: v.detect && Array.isArray(v.detect.enabled) && Array.isArray(v.detect.custom) ? withNewPresets(v.detect) : d.detect,
       export: {
         dpi: [150, 200, 300, 400, 600].includes(Number(v.export?.dpi)) ? Number(v.export!.dpi) : d.export.dpi,
         format: v.export?.format === 'jpeg' ? 'jpeg' : 'png',
@@ -887,14 +989,19 @@ function openDetect() {
 }
 
 // ---------- Export ----------
-export interface ExportOutcome { bytes: Uint8Array; report: VerifyReport; downscaled: { page: number; dpi: number }[]; ocrWords: number }
+export interface ExportOutcome { bytes: Uint8Array; report: VerifyReport; downscaled: { page: number; dpi: number }[]; ocrWords: number; timings: [string, number][] }
 
 async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: string, f: number) => void, method: 'vector' | 'image' = 'image'): Promise<ExportOutcome> {
   if (!S.doc) throw new Error('No document');
+  const timings: [string, number][] = [];
+  let t0 = performance.now();
+  const lap = (name: string) => { const t = performance.now(); timings.push([name, t - t0]); t0 = t; };
   const res = method === 'vector'
     ? { bytes: await exportVector(S.bytes!, S.password, S.boxes, onProgress), downscaled: [], ocrWords: 0 }
     : await exportRedacted(S.doc, S.boxes, opts, onProgress);
+  lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
   const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
+  lap('Structure check');
   if (ocr && S.boxes.some((b) => b.length)) {
     try {
       onProgress('Double-checking blacked-out areas', 1);
@@ -907,8 +1014,9 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
       // The structural checks above are the hard guarantee; the OCR pass is an extra safety net.
       report.notes = [...(report.notes ?? []), `OCR double-check unavailable: ${(e as Error).message}`];
     }
+    lap('Black-box check');
   }
-  return { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords };
+  return { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords, timings };
 }
 
 const ICON_OK = '<svg class="ico" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
@@ -956,6 +1064,10 @@ function exportDialog() {
     $('#x-image-opts').animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 180 });
   };
   showMethod();
+  // Start loading the redaction engine (~10 MB WASM) while the user reads the dialog.
+  const warm = () => { if (method === 'vector') void loadMuPdf().catch(() => {}); };
+  warm();
+  $('#x-method').addEventListener('click', warm);
   $('#x-cancel').onclick = closeModal;
   $('#x-go').onclick = async () => {
     const opts: ExportOptions = {
@@ -989,7 +1101,8 @@ function exportDialog() {
   };
 }
 
-function technicalReport({ bytes, report, downscaled, ocrWords }: ExportOutcome): string {
+function technicalReport({ bytes, report, downscaled, ocrWords, timings }: ExportOutcome): string {
+  const sec = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
   const mb = (bytes.length / 1048576).toFixed(2);
   const li = (s: string) => `<li>${esc(s)}</li>`;
   return `<ul>${[
@@ -997,7 +1110,8 @@ function technicalReport({ bytes, report, downscaled, ocrWords }: ExportOutcome)
     report.searchable ? `Text layer: ${ocrWords} OCR words, ${report.textInBoxes} inside redactions` : `Extractable text: ${report.textChars} chars`,
     `Fonts: ${report.fontPages.length ? `pages ${report.fontPages.join(', ')}` : 'none / allowed only'}`,
     `Annotations: ${report.annotations}; risky catalog keys: ${report.catalogKeys.join(', ') || 'none'}; metadata: ${report.metadataFields.join(', ') || 'none'}`,
-    report.ocr ? `OCR double-check: ${report.ocr.checkedRegions} region(s), ${report.ocr.leaks.length} leak(s)` : 'OCR double-check: not run (no boxes)',
+    report.ocr ? `Black-box check: ${report.ocr.checkedRegions} region(s), ${report.ocr.solidRegions ?? 0} solid, ${report.ocr.checkedRegions - (report.ocr.solidRegions ?? 0)} OCR'd, ${report.ocr.leaks.length} leak(s)` : 'Black-box check: not run (no boxes)',
+    `Time: ${timings.map(([n, ms]) => `${n} ${sec(ms)}`).join(', ')} (total ${sec(timings.reduce((a, [, ms]) => a + ms, 0))})`,
     ...(report.notes ?? []),
     ...downscaled.map((d) => `Page ${d.page} reduced to ${d.dpi} DPI to fit memory`),
     ...report.issues.map((i) => `ISSUE: ${i}`),
@@ -1088,6 +1202,12 @@ syncToolbar();
   },
   ocrRegions: (bytes: Uint8Array, boxes: Rect[][]) => ocrRedactedRegions(bytes, boxes),
   boxes: () => S.boxes,
+  zoom: () => S.zoom,
+  detectPrefs: () => prefs.detect,
+  pageText: async (i: number) => (await S.texts!.get(i)).text,
+  fitZoom: () => fitZoom(),
+  pointAt: (cx: number, cy: number) => pointAt(cx, cy),
+  setMode: (m: 'draw' | 'pan') => { S.mode = m; syncToolbar(); },
   search: async (q: string, matchCase = false, wholeWord = false) => { if (S.panel !== 'find') openFind(); S.findTerms = []; await runFind(q, matchCase, wholeWord); return S.sugg; },
   addTerm: async (q: string) => { if (S.panel !== 'find') openFind(); await runFind(q, false, false); return { terms: S.findTerms.length, hits: S.sugg.length }; },
   removeTerm: async (i: number) => { S.findTerms.splice(i, 1); await searchTerms(); return { terms: S.findTerms.length, hits: S.sugg.length }; },

@@ -65,6 +65,7 @@ button.big { padding: 13px 26px; font-size: 1.05rem; }
 #viewer {
   position: absolute; inset: 0; overflow: auto; padding: 14px 0 calc(var(--sheet-h, 0px) + 96px); -webkit-overflow-scrolling: touch;
   background: var(--canvas); border-radius: 18px 18px 0 0; margin: 0 6px;
+  --z: 1; touch-action: pan-x pan-y; /* pinch is handled in JS (main.ts) */
 }
 #empty { max-width: 380px; margin: 9vh auto 0; padding: 0 20px; text-align: center; color: var(--muted); }
 #empty .hero { width: 72px; height: 72px; fill: none; stroke: var(--accent); stroke-width: 1.4; color: var(--accent); margin-bottom: 8px; }

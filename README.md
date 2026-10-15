@@ -3,9 +3,9 @@
 Offline PDF redaction. Draw boxes over sensitive content (or let Umbra find personal details), then export either a **true redaction that keeps the original text** or a **flattened, image-only PDF**. Every export gets an automatic, fail-closed safety check. Source code is GPL-3.0-or-later. The app bundles MuPDF (AGPL-3.0-or-later); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Features
-- **Manual redaction**: draw, select, delete, undo, zoom.
+- **Manual redaction**: draw, select, delete, undo; pinch-zoom and double-tap zoom.
 - **Find & black out**: search across all pages (match case, whole word). Scanned pages are OCR'd on the device first.
-- **Find personal details**: toggleable detectors for Malaysian NRIC, phone, email, card (Luhn-checked), bank account, passport, date of birth, company registration number, labelled names, addresses and vehicle plates, plus custom regex. Results are reviewed first: amber = will be redacted, grey = skipped.
+- **Find personal details**: toggleable detectors for Malaysian NRIC, phone, email, card (Luhn-checked), bank account, passport, date of birth, company registration number, LHDN tax number (TIN), names (labelled, table columns, common Malaysian names, IC cards), addresses and vehicle plates, plus custom regex. Pictures inside typed pages (e.g. a pasted IC copy) are OCR'd too. Results are reviewed first: amber = will be redacted, grey = skipped.
 - **Two export methods**:
   - **Keep original text** (default): true redaction with MuPDF. Text, vector shapes fully under a box, and image pixels under each box are removed from the file. Forms and annotation appearances are flattened first, so boxes over them work too. Links, forms, attachments, scripts, metadata, outlines, the structure tree and ActualText/Alt descriptions are stripped. The output looks like the original, stays small and stays selectable.
   - **Image only** (maximum safety): every page is rasterized (300 DPI default, 150–600) and rebuilt as a brand-new image-only PDF. Grey pages are stored as 1 channel with PNG prediction and Flate compression.
@@ -14,7 +14,7 @@ Offline PDF redaction. Draw boxes over sensitive content (or let Umbra find pers
   - no extractable text (or, in searchable mode, none overlapping a redaction box)
   - no fonts (except the non-embedded Helvetica of the OCR layer), annotations, forms, attachments, outlines, JS or non-image XObjects
   - no Title/Author/etc. metadata
-  - OCR of every redacted region finds no readable text
+  - every redacted region is solid black in the output (pixel check); any region that isn't is OCR'd and must contain no readable text
   - the full report is available under Settings → Advanced
 - Light / dark / system theme. Android: no `INTERNET` permission, Storage Access Framework I/O, "Open with" support, backups disabled.
 
