@@ -20,6 +20,20 @@ Offline PDF redaction. Draw boxes over sensitive content (or let Umbra find pers
 
 📖 **[User guide](docs/USER_GUIDE.md)** · 🔒 **[Security policy](SECURITY.md)**
 
+## Download & verify
+Get the signed APK from [Releases](https://github.com/rainc07/UmbraPDF/releases). Android may warn that the app is from an unknown developer (Play Protect); tap **More details → Install anyway**.
+
+Every official APK is signed with this certificate:
+```
+SHA-256: 39:5B:52:86:9F:CC:17:A9:41:78:E0:2F:5C:D4:3F:91:9D:18:A8:F5:CF:68:EB:76:15:F0:1C:DE:29:BE:1D:03
+```
+Check before installing (Windows PowerShell; Android SDK build-tools needed for `apksigner`):
+```powershell
+Get-FileHash UmbraPDF-1.0.0.apk -Algorithm SHA256   # must match the hash in the release notes
+apksigner verify --print-certs UmbraPDF-1.0.0.apk    # "certificate SHA-256 digest" must match the line above
+```
+On Linux/macOS: `sha256sum UmbraPDF-1.0.0.apk`. If either value differs, don't install it.
+
 ## Layout
 ```
 core/                     platform-agnostic web core (TypeScript, Vite)
