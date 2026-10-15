@@ -42,7 +42,14 @@ jobs:
           fi
       - name: E2E + UI tests
         working-directory: core
-        run: CHROMIUM_PATH="$(command -v google-chrome || command -v chromium)" npm test
+        run: |
+          set -o pipefail
+          CHROMIUM_PATH="$(command -v google-chrome || command -v chromium)" npm test 2>&1 | tee test.log
+      - name: Report failed checks
+        if: failure()
+        working-directory: core
+        run: |
+          grep -E '^(FAIL|INFO)|Error|error' test.log | head -40 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
 
   apk:
     name: Test APK
