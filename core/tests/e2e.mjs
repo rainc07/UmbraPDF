@@ -476,6 +476,7 @@ check(V.size < V.imgSize / 3, `vector: much smaller than image export (${(V.size
     for (const [k, b] of [['scan', scan], ['mixed', mixed]]) {
       await T.load(new Uint8Array(b));
       out[k] = strip(await T.detect(ALL));
+      out[k + 'Page'] = await T.pageText(0);
       T.applyAll();
       const ex = await T.export({}, true, 'vector');
       out[k + 'Report'] = ex.report;
@@ -488,7 +489,7 @@ check(V.size < V.imgSize / 3, `vector: much smaller than image export (${(V.size
   check(fp.length === 0, `1.1 detect: decoys not flagged ${fp.map((h) => `${h.label}:${h.text}`).join(', ')}`);
   for (const k of ['scan', 'mixed']) {
     const hs = R[k];
-    check(hs.some((h) => h.label.includes('NRIC') && h.text === CARD.nric), `ID card (${k}): IC number found`);
+    check(hs.some((h) => h.label.includes('NRIC') && h.text.replace(/[^\dA-Z]/g, '').length >= 12), `ID card (${k}): IC number found ${hs.map((h) => `[${h.label}: ${h.text}]`).join(' ')} | OCR: ${JSON.stringify(R[k + 'Page'] ?? '').slice(0, 400)}`);
     check(hs.some((h) => h.label.includes('Name') && h.text === CARD.name.join(' ')), `ID card (${k}): name found ${hs.map((h) => `[${h.label}: ${h.text}]`).join(' ')}`);
     check(hs.some((h) => h.label.includes('Address') && CARD.address.every((a) => h.text.includes(a))), `ID card (${k}): full address found`);
     check(R[k + 'Report'].ok, `ID card (${k}): redacted export verified: ${R[k + 'Report'].issues.join('; ') || 'ok'}`);

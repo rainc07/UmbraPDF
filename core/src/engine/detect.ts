@@ -240,6 +240,19 @@ export const PRESETS: Preset[] = [
         if (!m[0].includes('-') && NEW_SSM.test(d) && COMPANY_CTX.test(lineOf(m, t)) && !IC_CTX.test(lineOf(m, t))) return false;
         return true;
       },
+    },
+    {
+      // OCR slips: O/o→0, I/l/|→1, S→5, B→8, Z→2, and dashes read as en/em dashes, "~" or with spaces.
+      // Only on ID-card pages or next to an IC label, and at most 3 slipped characters.
+      regex: /(?<![\dA-Za-z])[\dOoIl|SBZ]{6}\s?[-–—~]?\s?[\dOoIl|SBZ]{2}\s?[-–—~]?\s?[\dOoIl|SBZ]{4}(?![\dA-Za-z])/g,
+      accept: (m, t) => {
+        const raw = m[0].replace(/[\s\-–—~]/g, '');
+        if (/^\d+$/.test(raw) && /^\d{6}-?\d{2}-?\d{4}$/.test(m[0])) return false; // the exact pattern above handles it
+        if (raw.replace(/\d/g, '').length > 3 || !(CARD_CTX.test(t) || IC_CTX.test(lineOf(m, t)))) return false;
+        const d = raw.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2');
+        const mm = +d.slice(2, 4), dd = +d.slice(4, 6);
+        return mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
+      },
     }],
   },
   {
