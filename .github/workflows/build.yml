@@ -1,0 +1,90 @@
+# Tests + test APK on every push. On release/* branches and main, the test APK ("Umbra PDF (dev)",
+# app.umbrapdf.dev, signed with the public dev key) is published to the "dev-latest" pre-release.
+# Official releases are still built and signed on the maintainer's PC with the private release key.
+name: Build & test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Web core tests (Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: core/package-lock.json
+      - name: Install
+        working-directory: core
+        run: npm ci
+      - name: Build
+        working-directory: core
+        run: npm run build:android
+      - name: Check committed app assets match the source
+        run: |
+          if ! git diff --quiet -- app/src/main/assets/web; then
+            echo "::warning::app/src/main/assets/web differs from a fresh build. Run 'npm run build:android' and commit."
+            git diff --stat -- app/src/main/assets/web
+          fi
+      - name: E2E + UI tests
+        working-directory: core
+        run: CHROMIUM_PATH="$(command -v google-chrome || command -v chromium)" npm test
+
+  apk:
+    name: Test APK
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write   # publish the dev-latest pre-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build test APK and run unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDev
+      - name: Name and checksum
+        id: apk
+        run: |
+          src=$(ls app/build/outputs/apk/dev/*.apk | head -1)
+          name="UmbraPDF-dev-${GITHUB_SHA::7}.apk"
+          cp "$src" "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "sha=$(sha256sum "$name" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.name }}
+          retention-days: 14
+      - name: Publish to dev-latest pre-release
+        if: github.event_name == 'push' && (startsWith(github.ref_name, 'release/') || github.ref_name == 'main')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete dev-latest --cleanup-tag --yes 2>/dev/null || true
+          cat > notes.md <<NOTES
+          **Test build, not an official release.** Installs as a separate app, "Umbra PDF (dev)", next to the real Umbra PDF.
+
+          - Branch: \`${GITHUB_REF_NAME}\`, commit \`${GITHUB_SHA::7}\`
+          - APK SHA-256: \`${{ steps.apk.outputs.sha }}\`
+          - Signed with the public dev key (certificate SHA-256 \`b576dca18e63b2cea6251730f11046c4e93b394417ea0998dbd69efe2cb37c27\`). Official releases use a different, private key.
+          NOTES
+          gh release create dev-latest "${{ steps.apk.outputs.name }}" --prerelease --latest=false \
+            --target "$GITHUB_SHA" --title "Dev build (${GITHUB_REF_NAME} @ ${GITHUB_SHA::7})" --notes-file notes.md

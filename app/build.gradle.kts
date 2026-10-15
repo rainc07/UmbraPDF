@@ -27,6 +27,14 @@ android {
     }
 
     signingConfigs {
+        // Public, throwaway key for test builds made by GitHub Actions ("Umbra PDF (dev)", app.umbrapdf.dev).
+        // It can't sign or update the real app, which uses the private release key above.
+        create("dev") {
+            storeFile = file("dev.keystore")
+            storePassword = "umbra-dev-public"
+            keyAlias = "umbradev"
+            keyPassword = "umbra-dev-public"
+        }
         if (hasReleaseKey) {
             create("release") {
                 storeFile = file(keystoreProps.getProperty("storeFile"))
@@ -38,6 +46,18 @@ android {
     }
 
     buildTypes {
+        // Test build: same as release (shrunk, not debuggable) but a separate app that installs next to the real one.
+        create("dev") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+            signingConfig = signingConfigs.getByName("dev")
+            matchingFallbacks += listOf("release")
+            optimization {
+                enable = true
+                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
+            }
+        }
         release {
             if (hasReleaseKey) signingConfig = signingConfigs.getByName("release")
             optimization {

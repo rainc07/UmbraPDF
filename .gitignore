@@ -20,6 +20,8 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+# Public test key for "Umbra PDF (dev)" builds only (app.umbrapdf.dev). Never used for releases.
+!app/dev.keystore
 
 # Build outputs / IDE
 *.apk
