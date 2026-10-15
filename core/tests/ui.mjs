@@ -109,11 +109,76 @@ await page.keyboard.down('Control'); await page.mouse.wheel(0, -200); await page
 await page.waitForTimeout(300);
 check((await T('zoom')) > zw0 * 1.3, `Ctrl+wheel zooms in (${zw0.toFixed(3)} → ${(await T('zoom')).toFixed(3)})`);
 
+// Redacted list follows the page; Undo / Redo / Reset.
+{
+  const d2 = await PDFDocument.create(); const f2 = await d2.embedFont(StandardFonts.Helvetica);
+  const p2 = d2.addPage([612, 792]);
+  p2.drawText('Email: siti@example.com', { x: 72, y: 700, size: 14, font: f2 });
+  p2.drawText('Phone: 012-345 6789', { x: 72, y: 670, size: 14, font: f2 });
+  const r = await page.evaluate(async (a) => {
+    const T = window.__umbraTest; await T.load(new Uint8Array(a));
+    const out = {};
+    await T.detect(['email', 'phone']); T.applyAll();
+    const n = () => T.boxes().flat().length, on = () => T.applied().filter((x) => x.on).length;
+    out.applied = [n(), on()];
+    T.deleteBox(0, 0);                       // remove one auto-detected box by hand
+    out.afterDelete = [n(), on()];
+    T.undo(); out.afterUndo = [n(), on(), T.canRedo()];
+    T.redo(); out.afterRedo = [n(), on()];
+    T.reset(); out.afterReset = [n(), on()];
+    T.undo(); out.afterResetUndo = [n(), on()];
+    out.redoCleared = (T.deleteBox(0, 0), !T.canRedo());
+    return out;
+  }, Array.from(await d2.save()));
+  check(r.applied[0] === 2 && r.applied[1] === 2, `applied: 2 boxes, 2 ticked (${r.applied})`);
+  check(r.afterDelete[0] === 1 && r.afterDelete[1] === 1, `deleting a box by hand unticks it in the Redacted list (${r.afterDelete})`);
+  check(r.afterUndo[0] === 2 && r.afterUndo[1] === 2 && r.afterUndo[2], `undo restores box and tick, redo available (${r.afterUndo})`);
+  check(r.afterRedo[0] === 1 && r.afterRedo[1] === 1, `redo removes it again (${r.afterRedo})`);
+  check(r.afterReset[0] === 0 && r.afterReset[1] === 0, `reset removes every box and unticks all (${r.afterReset})`);
+  check(r.afterResetUndo[0] === 1 && r.afterResetUndo[1] === 1, `undo after reset brings the boxes back (${r.afterResetUndo})`);
+  check(r.redoCleared, 'a new edit clears Redo');
+  const ui = await page.evaluate(() => ({
+    open: !!document.querySelector('#btn-open'), settingsVisible: getComputedStyle(document.querySelector('#btn-settings')).display !== 'none',
+    top: ['#btn-find', '#btn-detect', '#btn-export'].every((id) => document.querySelector('.appbar ' + id)),
+    dock: ['#btn-undo', '#btn-redo', '#btn-reset'].every((id) => document.querySelector('.dock ' + id)),
+  }));
+  check(!ui.open && !ui.settingsVisible && ui.top && ui.dock, `document screen: Find/Auto Detect/Export on top, Undo/Redo/Reset at the bottom, no Open/Settings (${JSON.stringify(ui)})`);
+}
+
+// Landscape: side panel 20–45% wide, document beside it, swappable side, start screen doesn't scroll.
+{
+  await page.setViewportSize({ width: 915, height: 412 });
+  await page.waitForTimeout(300);
+  const L = await page.evaluate(async () => {
+    const T = window.__umbraTest;
+    await T.detect(['email']);
+    await new Promise((r) => setTimeout(r, 500));
+    const st = document.querySelector('.stage').getBoundingClientRect();
+    const p = document.querySelector('#panel').getBoundingClientRect(), v = document.querySelector('#viewer').getBoundingClientRect();
+    const right = { pw: p.width / st.width, panelRight: Math.abs(p.right - st.right) < 8, viewerEnds: v.right <= p.left + 2 };
+    document.querySelector('#panel .side-swap').click();
+    await new Promise((r) => setTimeout(r, 450));
+    const p2 = document.querySelector('#panel').getBoundingClientRect(), v2 = document.querySelector('#viewer').getBoundingClientRect();
+    const left = { panelLeft: Math.abs(p2.left - st.left) < 8, viewerStarts: v2.left >= p2.right - 2 };
+    document.querySelector('#panel .side-swap').click();
+    return { right, left };
+  });
+  check(L.right.pw >= 0.2 && L.right.pw <= 0.45 && L.right.panelRight && L.right.viewerEnds, `landscape: side panel on the right, ${Math.round(L.right.pw * 100)}% wide, document beside it`);
+  check(L.left.panelLeft && L.left.viewerStarts, 'landscape: panel moves to the left side');
+  await page.setViewportSize({ width: 412, height: 860 });
+  await page.waitForTimeout(300);
+}
+
 // Settings saved by 1.0.0 (no TIN detector yet): the new detector starts on, a detector the user turned off stays off.
 const key = 'umbra.prefs.v1'; // platform/browser.ts PREFS_KEY
 await page.evaluate((k) => localStorage.setItem(k, JSON.stringify({ theme: 'system', detect: { enabled: ['nric', 'phone', 'email', 'card', 'bank', 'passport', 'dob', 'company', 'name'], custom: [] } })), key);
 await page.reload();
 await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+for (const [w, h] of [[412, 860], [915, 412]]) {
+  await page.setViewportSize({ width: w, height: h }); await page.waitForTimeout(200);
+  const sc = await page.evaluate(() => [document.documentElement.scrollHeight, innerHeight, document.querySelector('#viewer').scrollHeight, document.querySelector('#viewer').clientHeight]);
+  check(sc[0] <= sc[1] && sc[2] <= sc[3], `start screen ${w}x${h}: nothing scrolls (${sc})`);
+}
 const dp = await page.evaluate(() => window.__umbraTest.detectPrefs());
 check(dp.enabled.includes('tin') && !dp.enabled.includes('address'), `update: new TIN detector switched on, user's own choices kept (${dp.enabled.join(',')})`);
 

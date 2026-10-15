@@ -23,6 +23,7 @@ const S = {
   sizes: [] as PageSize[],
   boxes: [] as Rect[][],
   undo: [] as Action[],
+  redo: [] as Action[],
   zoom: 1, // CSS px per PDF point
   mode: 'draw' as 'draw' | 'pan',
   sel: null as { page: number; idx: number } | null,
@@ -87,6 +88,8 @@ function syncToolbar() {
   $('#btn-detect').classList.toggle('on', S.panel === 'detect');
   document.querySelectorAll<HTMLButtonElement>('#panel [data-busy]').forEach((b) => { b.disabled = S.busy; });
   $<HTMLButtonElement>('#btn-undo').disabled = !S.undo.length || S.busy;
+  $<HTMLButtonElement>('#btn-redo').disabled = !S.redo.length || S.busy;
+  $<HTMLButtonElement>('#btn-reset').disabled = !S.boxes.some((b) => b.length) || S.busy;
   document.body.classList.toggle('has-doc', has);
   $('#docname').textContent = has ? S.name : '';
   $('#mode-draw').classList.toggle('on', S.mode === 'draw');
@@ -133,6 +136,7 @@ async function loadFile(file: OpenedFile) {
   S.sizes = await pageSizes(doc);
   S.boxes = S.sizes.map(() => []);
   S.undo = [];
+  S.redo = [];
   S.dirty = false;
   S.sel = null;
   S.sugg = [];
@@ -171,7 +175,7 @@ async function closeDocument() {
   viewer.classList.remove('leaving');
   io.disconnect();
   if (S.doc) await closePdf(S.doc);
-  Object.assign(S, { doc: null, name: '', sizes: [], boxes: [], undo: [], sel: null, sugg: [], texts: null, dirty: false, applied: [], bytes: null, password: undefined });
+  Object.assign(S, { doc: null, name: '', sizes: [], boxes: [], undo: [], redo: [], sel: null, sugg: [], texts: null, dirty: false, applied: [], bytes: null, password: undefined });
   S.gen++;
   viewer.replaceChildren(emptyEl);
   syncToolbar();
@@ -382,17 +386,33 @@ function select(sel: typeof S.sel) {
   syncToolbar();
 }
 
-function apply(a: Action, record = true) {
+/** record: 'new' = a fresh user action (clears Redo), 'redo' = re-doing an undone one, false = undo itself. */
+function apply(a: Action, record: 'new' | 'redo' | false = 'new') {
   const ops = a.type === 'group' ? a.ops : [a];
   for (const o of ops) {
     if (o.type === 'add') S.boxes[o.page].splice(o.idx, 0, o.rect);
     else S.boxes[o.page].splice(o.idx, 1);
   }
   if (record) S.undo.push(a);
+  if (record === 'new') S.redo = [];
   S.dirty = true;
   S.sel = null;
   for (const p of new Set(ops.map((o) => o.page))) drawBoxes(p);
+  syncApplied();
   syncToolbar();
+}
+
+/**
+ * The Redacted list always mirrors the page: an item counts as redacted while any of its boxes is on the page.
+ * So deleting its box by hand, Undo, Redo or Reset all update the list (and its tick) too.
+ */
+function syncApplied() {
+  let changed = false;
+  for (const it of S.applied) {
+    const on = it.rects.some((r) => S.boxes[it.page]?.includes(r));
+    if (on !== it.on) { it.on = on; changed = true; }
+  }
+  if (changed && S.panel) renderResults();
 }
 
 const invertOp = (o: Op): Op => ({ ...o, type: o.type === 'add' ? 'del' : 'add' });
@@ -415,9 +435,42 @@ function deleteSelected() {
   apply({ type: 'del', page, idx, rect: S.boxes[page][idx] });
 }
 
+function redo() {
+  const a = S.redo.pop();
+  if (!a) return;
+  apply(a, 'redo');
+  // Re-doing an Apply moves those items from the review list back to the Redacted list.
+  if (a.type === 'group' && a.sugg) {
+    const ids = new Set(a.sugg.items.map((x) => x.id));
+    const had = S.sugg.length;
+    S.sugg = S.sugg.filter((x) => !ids.has(x.id));
+    for (const it of a.sugg.items) if (!S.applied.some((x) => x.id === it.id)) S.applied.push({ ...it, on: true });
+    syncApplied();
+    if (S.panel && (had !== S.sugg.length || a.sugg.items.length)) refreshSugg();
+  }
+}
+
+/** Remove every box on every page (asks first; can be undone). */
+function resetAll() {
+  const n = S.boxes.reduce((k, b) => k + b.length, 0);
+  if (!n || S.busy) return;
+  modal(`<h2>Remove all redactions?</h2>
+    <p class="hint">This removes all ${n} black box(es) on every page. You can still bring them back with Undo.</p>
+    <div class="row"><button id="rs-no">Cancel</button><button id="rs-yes" class="primary danger">Remove all</button></div>`, true);
+  $('#rs-no').onclick = closeModal;
+  $('#rs-yes').onclick = () => {
+    closeModal();
+    const ops: Op[] = [];
+    S.boxes.forEach((b, page) => { for (let idx = b.length - 1; idx >= 0; idx--) ops.push({ type: 'del', page, idx, rect: b[idx] }); });
+    apply({ type: 'group', ops });
+    toast('All redactions removed. Undo brings them back.');
+  };
+}
+
 function undo() {
   const a = S.undo.pop();
   if (!a) return;
+  S.redo.push(a);
   apply(invert(a), false);
   // Undoing an Apply puts those items back into the review list (if it is still the same scan).
   if (a.type === 'group' && a.sugg) {
@@ -483,7 +536,10 @@ type ThemePref = 'system' | 'light' | 'dark';
 interface ExportPrefs { dpi: number; format: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
 interface Options { hideRecents: boolean; platesLabelled: boolean; confirmLeave: boolean; closeAfterRedact: boolean; reviewReminder: boolean }
 const DEFAULT_OPTIONS: Options = { hideRecents: false, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
-interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[] }; export: ExportPrefs; opts: Options }
+interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
+/** Landscape side panel: which side, and its width in % of the screen (20–45). */
+interface UiPrefs { panelSide: 'left' | 'right'; panelW: number }
+const clampPanelW = (w: number) => Math.min(45, Math.max(20, Math.round(w)));
 /** Detectors added in an update start switched on (if on by default) for people with saved settings too. */
 function withNewPresets(d: Prefs['detect']): Prefs['detect'] {
   const known = d.known ?? ['nric', 'phone', 'email', 'card', 'bank', 'passport', 'dob', 'company', 'name', 'address', 'plate']; // 1.0.0 set
@@ -495,6 +551,7 @@ function loadPrefs(): Prefs {
     theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id) },
     export: { dpi: DEFAULT_EXPORT.dpi, format: DEFAULT_EXPORT.format, searchable: true, method: 'vector' },
     opts: { ...DEFAULT_OPTIONS },
+    ui: { panelSide: 'right', panelW: 34 },
   };
   try {
     const v = JSON.parse(host.loadPrefs() ?? 'null') as Partial<Prefs> | null;
@@ -509,6 +566,7 @@ function loadPrefs(): Prefs {
         return o;
       })(),
       detect: v.detect && Array.isArray(v.detect.enabled) && Array.isArray(v.detect.custom) ? withNewPresets(v.detect) : d.detect,
+      ui: { panelSide: v.ui?.panelSide === 'left' ? 'left' : 'right', panelW: Number.isFinite(v.ui?.panelW) ? clampPanelW(v.ui!.panelW) : d.ui.panelW },
       export: {
         dpi: [150, 200, 300, 400, 600].includes(Number(v.export?.dpi)) ? Number(v.export!.dpi) : d.export.dpi,
         format: v.export?.format === 'jpeg' ? 'jpeg' : 'png',
@@ -585,14 +643,30 @@ let suggGen = 0; // bumps on every new search/scan
 
 const stage = $('.stage');
 /** Keep the document scrollable above the sheet and the zoom buttons just above it. */
+const sideMode = window.matchMedia('(orientation: landscape) and (min-aspect-ratio: 4/3)');
+function applyPanelUi() {
+  document.body.classList.toggle('panel-left', prefs.ui.panelSide === 'left');
+  stage.style.setProperty('--panel-w', `${prefs.ui.panelW}%`);
+}
 function updateSheetSpace() {
   const p = $('#panel');
+  const open = !p.hidden && !p.classList.contains('closing');
+  if (sideMode.matches) {
+    // Side panel: the document shrinks beside it instead of scrolling under it.
+    const w = open ? Math.round(p.offsetWidth) : 0;
+    stage.style.setProperty('--sheet-h', '0px');
+    stage.style.setProperty('--side-l', prefs.ui.panelSide === 'left' ? `${w}px` : '0px');
+    stage.style.setProperty('--side-r', prefs.ui.panelSide === 'right' ? `${w}px` : '0px');
+    return;
+  }
+  stage.style.setProperty('--side-l', '0px'); stage.style.setProperty('--side-r', '0px');
   const h = p.hidden || p.classList.contains('closing') ? 0
     : p.classList.contains('peek') ? parseFloat(getComputedStyle(p).getPropertyValue('--peek-h')) || 64
     : p.offsetHeight;
   stage.style.setProperty('--sheet-h', `${Math.round(h)}px`);
 }
 new ResizeObserver(updateSheetSpace).observe($('#panel'));
+sideMode.addEventListener('change', () => { $('#panel').classList.remove('peek'); updateSheetSpace(); });
 
 function showPanel(html: string) {
   const p = $('#panel');
@@ -626,12 +700,30 @@ function bindGrab(p: HTMLElement) {
   const grab = $('#p-grab');
   let y0: number | null = null;
   grab.onpointerdown = (e) => { y0 = e.clientY; grab.setPointerCapture(e.pointerId); };
+  grab.onpointermove = (e) => {
+    if (y0 === null || !sideMode.matches) return;
+    // Side panel: drag the inner edge to resize (20–45% of the screen).
+    const sb = stage.getBoundingClientRect();
+    const px = prefs.ui.panelSide === 'right' ? sb.right - e.clientX : e.clientX - sb.left;
+    prefs.ui.panelW = clampPanelW((px / sb.width) * 100);
+    applyPanelUi(); updateSheetSpace();
+  };
   grab.onpointerup = (e) => {
     if (y0 === null) return;
     const dy = e.clientY - y0; y0 = null;
+    if (sideMode.matches) { savePrefs(); updateSheetSpace(); return; }
     if (Math.abs(dy) < 8) toggle(); else toggle(dy > 0);
   };
-  p.querySelector<HTMLElement>('.ph b')?.addEventListener('click', () => toggle());
+  p.querySelector<HTMLElement>('.ph b')?.addEventListener('click', () => { if (!sideMode.matches) toggle(); });
+  // Landscape: move the panel to the other side.
+  const close = p.querySelector<HTMLElement>('.ph .pc');
+  if (close && !p.querySelector('.side-swap')) {
+    close.insertAdjacentHTML('beforebegin', '<button class="pc side-swap" aria-label="Move panel to the other side" title="Move to the other side"><svg class="ico" viewBox="0 0 24 24"><path d="M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4"/></svg></button>');
+    p.querySelector<HTMLElement>('.side-swap')!.onclick = () => {
+      prefs.ui.panelSide = prefs.ui.panelSide === 'right' ? 'left' : 'right';
+      savePrefs(); applyPanelUi(); updateSheetSpace();
+    };
+  }
 }
 let panelCloseTimer = 0;
 /** animate: slide down when the user closes it; instant when another panel replaces it. */
@@ -1144,11 +1236,13 @@ function resultDialog(out: ExportOutcome) {
 }
 
 // ---------- Wiring ----------
-$('#btn-open').onclick = pickAndLoad;
+$('#btn-close').onclick = () => { if (S.busy) return; if (S.panel) closePanel(); if (S.dirty && prefs.opts.confirmLeave) confirmLeave(() => void closeDocument()); else void closeDocument(); };
 $('#btn-open-2').onclick = pickAndLoad;
 $('#mode-draw').onclick = () => { S.mode = 'draw'; syncToolbar(); };
 $('#mode-pan').onclick = () => { S.mode = 'pan'; syncToolbar(); };
 $('#btn-undo').onclick = undo;
+$('#btn-redo').onclick = redo;
+$('#btn-reset').onclick = resetAll;
 $('#btn-settings').onclick = settingsDialog;
 $('#zoom-in').onclick = () => setZoom(S.zoom * 1.25);
 $('#zoom-out').onclick = () => setZoom(S.zoom / 1.25);
@@ -1218,6 +1312,10 @@ syncToolbar();
   applyAll: () => applySugg(S.sugg.filter((x) => x.on)),
   toggle: (id: number) => toggleSugg(id),
   undo,
+  redo,
+  deleteBox: (page: number, idx: number) => { S.sel = { page, idx }; deleteSelected(); },
+  canRedo: () => S.redo.length > 0,
+  reset: () => { resetAll(); ($('#rs-yes') as HTMLButtonElement | null)?.click(); },
   back: () => handleBack(),
   state: () => ({ hasDoc: !!S.doc, dirty: S.dirty, panel: S.panel, modal: !$('#modal').hidden && !$('#modal').classList.contains('closing') }),
 };

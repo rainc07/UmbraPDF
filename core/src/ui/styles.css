@@ -331,3 +331,63 @@ body:not(.has-doc) .dock { display: flex; position: absolute; left: 0; right: 0;
 /* The sheet slides behind the tool bar, never over it */
 .stage { overflow: hidden; }
 .dock { position: relative; z-index: 4; }
+
+/* ---------- 1.1: top bar actions (document open) / start screen ---------- */
+body.has-doc .home-only, body:not(.has-doc) .doc-only { display: none; }
+body.has-doc .brand { display: none; }
+.docacts { display: flex; gap: 6px; align-items: center; }
+.act { min-height: 40px; padding: 6px 12px; gap: 6px; background: var(--surface); font-size: .9rem; font-weight: 500; }
+.act .ico { width: 20px; height: 20px; }
+.act.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-text); }
+.act.primary { font-weight: 600; }
+body.has-doc .docname { text-align: left; color: var(--text); font-weight: 500; }
+@media (max-width: 560px) {
+  .act:not(.primary) span { display: none; }
+  .act:not(.primary) { width: 42px; padding: 0; }
+}
+@media (max-width: 380px) { .act.primary span { display: none; } .act.primary { width: 42px; padding: 0; } }
+button.primary.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+/* Start screen: content centred, never scrolls */
+body:not(.has-doc) #viewer { overflow: hidden; padding: 0; display: grid; place-items: center; }
+body:not(.has-doc) #empty { margin: 0 auto; }
+@media (max-height: 520px) {
+  #empty .hero { width: 52px; height: 52px; margin-bottom: 2px; }
+  #empty h1 { font-size: 1.25rem; margin-bottom: 4px; }
+  #empty p { margin-bottom: 12px; font-size: .9rem; }
+}
+
+/* ---------- Landscape: side panel (left or right, resizable 20–45%), compact bars ---------- */
+@media (orientation: landscape) and (min-aspect-ratio: 4/3) {
+  .appbar { padding-top: calc(var(--sat) + 4px); padding-bottom: 4px; }
+  .act, .appbar .round { min-height: 36px; }
+  .appbar .round { width: 36px; }
+  .dock { padding-top: 4px; padding-bottom: calc(var(--sab) + 4px); }
+  .tool, .dock .tool { flex-direction: row; min-height: 38px; padding: 4px 8px; justify-content: center; gap: 6px; font-size: .8rem; }
+  .dock .seg .tool { width: auto; padding: 4px 12px; }
+  .tool .ico { width: 20px; height: 20px; }
+  #viewer { padding-bottom: 72px; left: var(--side-l, 0px); right: var(--side-r, 0px); transition: left .3s, right .3s; }
+  .zoom { bottom: 16px; right: calc(var(--side-r, 0px) + 16px); }
+  #panel {
+    top: 0; bottom: 0; right: 0; left: auto; max-height: none; height: 100%;
+    width: clamp(20%, var(--panel-w, 34%), 45%);
+    border-radius: 18px 0 0 0; border: 1px solid var(--line); border-right: 0; border-bottom: 0;
+    box-shadow: -10px 0 30px rgba(0, 0, 0, .22); padding-left: 22px;
+  }
+  #panel.enter, #panel.closing { transform: translateX(105%); }
+  #panel.peek { transform: none; overflow: auto; }
+  body.panel-left #panel { left: 0; right: auto; border-radius: 0 18px 0 0; border-left: 0; border-right: 1px solid var(--line);
+    box-shadow: 10px 0 30px rgba(0, 0, 0, .22); padding-left: 14px; padding-right: 22px; }
+  body.panel-left #panel.enter, body.panel-left #panel.closing { transform: translateX(-105%); }
+  /* The handle becomes a drag bar on the inner edge for resizing */
+  #panel .grab { position: absolute; top: 0; bottom: 0; left: 0; width: 18px; height: auto; border-radius: 0; cursor: ew-resize; background: transparent; }
+  #panel .grab i { width: 4px; height: 40px; }
+  body.panel-left #panel .grab { left: auto; right: 0; }
+  #panel .ph { top: 0; }
+  body #panel .side-swap { display: inline-flex; }
+  #toast { bottom: calc(var(--sab) + 60px); }
+}
+#panel .side-swap { display: none; width: 36px; min-height: 36px; padding: 0; margin-left: auto; margin-right: 6px; }
+/* The page itself never scrolls (only the document viewer does); the hidden dock must not add height. */
+html, body { overflow: hidden; }
+body:not(.has-doc) .dock { position: fixed; }

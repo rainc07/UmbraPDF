@@ -120,8 +120,11 @@ const labelRe = NAME_LABELS.map((l) => ci(esc(l)).replace(/ /g, '\\s+')).join('|
 const honorRe = HONORIFICS.map((h) => ci(esc(h)).replace(/ /g, '\\s+')).join('|');
 /** Words that show a "name" is really a form caption or sentence ("Name of applicant", "Nama penuh seperti dalam IC"). */
 const NAME_STOP = /^(?:of|the|and|for|to|in|on|at|by|as|per|shall|will|must|is|are|details?|information|info|address|alamat|number|nombor|no|date|tarikh|signature|tandatangan|butiran|maklumat|card|kad|ic|nric|passport|pasport|account|akaun|phone|telefon|email|e-mail|list|senarai|form|borang|section|bahagian|field|here|below|above|page|title|position|jawatan|company|syarikat|bank|seperti|dalam|yang|dan|atau|please|sila|refer|see|n\/a|nil|tiada|not|none)$/i;
+/** Form/field words: a "name" containing one is a field label ("Account No.", "IC Number", "Date Of Birth"), never a person. */
+const FIELD_WORD = /^(?:account|acct|a\/c|akaun|no|nos|number|num|nombor|ic|nric|mykad|passport|pasport|date|tarikh|dob|tel|telephone|phone|mobile|fax|email|e-mail|address|alamat|bank|branch|cawangan|code|kod|ref|reference|rujukan|amount|jumlah|total|balance|baki|id|tin|tax|cukai|swift|iban|postcode|poskod|gender|jantina|race|bangsa|religion|agama|nationality|status|occupation|pekerjaan|signature|tandatangan|holder|pemegang|type|jenis|salary|gaji|income|pendapatan|sdn|bhd|berhad)$/i;
 const nameWordsOk = (v: string) => {
   const ws = v.split(/[\s]+/).filter(Boolean);
+  if (ws.some((w) => FIELD_WORD.test(w.replace(/[.:,;()]+$/g, '')))) return false;
   return ws.length > 0 && !NAME_STOP.test(ws[0]) && ws.filter((w) => NAME_STOP.test(w)).length <= (ws.length > 3 ? 1 : 0);
 };
 const nameOk = (m: RegExpExecArray, text: string) => {

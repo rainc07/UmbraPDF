@@ -3,11 +3,13 @@
 Umbra PDF blacks out (redacts) sensitive parts of a PDF and saves a clean copy. It works fully offline: your files never leave your device, and the app has no internet permission at all.
 
 ## 1. Open a PDF
-Tap **Open** at the top, or **Open a PDF** on the start screen. You can also use "Open with → Umbra PDF" from a file manager. Password-protected PDFs ask for the password, which is only kept in memory.
+Tap **Open a PDF** on the start screen. You can also use "Open with → Umbra PDF" from a file manager. Password-protected PDFs ask for the password, which is only kept in memory.
+
+With a document open, **Find**, **Auto Detect** and **Export** are at the top right, and **←** (or the Back button) returns to the start screen. Settings are on the start screen.
 
 ## 2. Redact by hand
 - Pick **Redact** in the bottom bar, then drag a box over anything you want hidden.
-- Tap a box to select it, then tap **×** to remove it. **Undo** reverts your last step.
+- Tap a box to select it, then tap **×** to remove it. **Undo** reverts your last step and **Redo** puts it back. **Reset** removes every box on every page (it asks first, and Undo brings them back).
 - Switch to **Scroll** to move around the page without drawing.
 - **Zoom:** pinch with two fingers (works in Redact mode too; two fingers never draw a box), double-tap to switch between fit-to-width and close-up, or use **−** / **+**. On a computer, Ctrl + mouse wheel or a trackpad pinch also zoom.
 
@@ -50,11 +52,13 @@ How the review works:
 - **Redacted** tab: everything you redacted from Find or Auto Detect. Untick an item to remove its black box again, or tick it to put it back. It stays available until you close the document.
 - The **By type** tab groups results (e.g. "Vehicle plate 3"). Tap a type to include or skip all of it, or **×** to remove it from the results.
 - On small screens, tap or drag the handle at the top of the panel (or its title) to shrink it to a bar and see more of the page.
+- In landscape the panel sits beside the document instead: drag its inner edge to make it wider or narrower (20–45% of the screen), and tap **⇄** to move it to the other side. Both are remembered.
+- Removing an auto-detected box on the page (or with Undo/Reset) also unticks it in the **Redacted** list.
 
 > Auto Detect is a helper, not a guarantee. Uncommon names without a label, blurry photos and unusual address layouts can be missed. Always look over every page before exporting, and use **Find** for anything it misses.
 
 ## 5. Export a redacted copy
-Tap **Export** in the bottom bar. Your choices are remembered for next time. First pick a method:
+Tap **Export** at the top right. Your choices are remembered for next time. First pick a method:
 
 - **Keep original text** (recommended): Umbra removes the text, shapes and image parts under your boxes from the file itself and keeps everything else as it was. The copy looks exactly like the original, stays small, and all visible text can still be selected and searched. Filled-in form fields stay visible as normal text but are no longer editable. Links, attachments, comments and file details are removed.
 - **Image only** (maximum safety): every page becomes a picture with the boxes burned in. Nothing else from the original file is kept. Files are larger, and text can only be searched with the OCR option below.
