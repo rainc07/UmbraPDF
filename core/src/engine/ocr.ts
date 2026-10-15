@@ -235,8 +235,19 @@ export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: 
   const clean = preprocessForOcr(canvas);
   let second: OcrWord[] = [];
   try { second = await recognizeWords(clean, onStatus, 45, PSM.SPARSE_TEXT); } finally { clean.width = clean.height = 0; }
-  // The cleaned pass is the better reader on these pages: weak first-pass words (pattern noise) are dropped.
-  const kept = first.filter((a) => a.confidence >= 55 && !second.some((b) => (centreIn(a, b) || centreIn(b, a)) && b.confidence > a.confidence));
-  const added = second.filter((b) => !kept.some((a) => (centreIn(a, b) || centreIn(b, a))));
+  // Where both passes read the same spot, keep the better reading: the longer one if one is a fragment of the
+  // other (e.g. "900101-14-5678" vs "14-"), otherwise the more confident one. A first-pass word that the second
+  // pass didn't read at all is kept (nothing better to replace it with).
+  const overlap = (a: OcrWord, b: OcrWord) => centreIn(a, b) || centreIn(b, a);
+  const len = (w: OcrWord) => w.text.replace(/[^\p{L}\p{N}]/gu, '').length;
+  const kept: OcrWord[] = [];
+  const dropped = new Set<OcrWord>();
+  for (const a of first) {
+    const bs = second.filter((b) => overlap(a, b));
+    if (!bs.length) { kept.push(a); continue; }
+    const bLen = bs.reduce((n, b) => n + len(b), 0), bConf = Math.max(...bs.map((b) => b.confidence));
+    if (len(a) > 1.3 * bLen || (len(a) >= bLen && a.confidence >= bConf)) { kept.push(a); bs.forEach((b) => dropped.add(b)); }
+  }
+  const added = second.filter((b) => !dropped.has(b) && !kept.some((a) => overlap(a, b)));
   return relineWords([...kept, ...added]);
 }

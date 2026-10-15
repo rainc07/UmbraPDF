@@ -31,7 +31,7 @@ export async function drawCard(page, card = CARD, opts = {}) {
     g.fillStyle = '#c9a54a'; g.fillRect(70, 180, 110, 85);
     const lines = [];
     const text = (t, x, y, font, color = '#1c2633') => {
-      g.font = font; g.fillStyle = color; g.fillText(t, x, y);
+      g.font = font.replace('sans-serif', opts.family ?? 'sans-serif'); g.fillStyle = color; g.fillText(t, x, y);
       const m = g.measureText(t);
       lines.push({ text: t, x, y: y - m.actualBoundingBoxAscent, w: m.width, h: m.actualBoundingBoxAscent + m.actualBoundingBoxDescent });
     };
