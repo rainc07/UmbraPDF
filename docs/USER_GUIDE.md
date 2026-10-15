@@ -1,0 +1,85 @@
+# Umbra PDF user guide
+
+Umbra PDF blacks out (redacts) sensitive parts of a PDF and saves a clean copy. It works fully offline: your files never leave your device, and the app has no internet permission at all.
+
+## 1. Open a PDF
+Tap **Open** at the top, or **Open a PDF** on the start screen. You can also use "Open with → Umbra PDF" from a file manager. Password-protected PDFs ask for the password, which is only kept in memory.
+
+## 2. Redact by hand
+- Pick **Redact** in the bottom bar, then drag a box over anything you want hidden.
+- Tap a box to select it, then tap **×** to remove it. **Undo** reverts your last step.
+- Switch to **Scroll** to move around the page without drawing. Use **−** / **+** to zoom.
+
+## 3. Find & redact (search)
+Tap **Find**, type a word or phrase, and tap **Find**.
+- **Match case**: only matches the exact upper/lower case.
+- **Whole word**: `ali` finds "Ali" but not "Alice".
+- Each search is kept as a filter chip under the box, so you can search several words in a row (for example each part of a name). Tap **×** on a chip to remove that word and its matches.
+- Every match is outlined on the page. Tap **Redact** on one row, or **Redact (n)** for all selected matches (this also closes the panel).
+- Matches that are already fully redacted aren't offered again, so nothing gets redacted twice.
+- Scanned pages (photos or scans with no real text) are read with on-device text recognition (OCR) first, so the first search is slower.
+
+## 4. Find personal details automatically
+Tap **Auto Detect**, then **Scan document** at the top. **Advanced config** (collapsed by default) lets you turn detectors on or off and add custom patterns.
+
+| Detector | Examples |
+|---|---|
+| NRIC (MyKad) | 900101-14-5678, 900101145678 |
+| Phone | +60 12-345 6789, 012-3456789, 03-2161 2345 |
+| Email | name@example.com |
+| Card number | 13–19 digits, checked with the Luhn checksum |
+| Bank account | 10–16 digits, only when labelled "account", "akaun", "a/c" or "bank" |
+| Passport | A12345678 / H… / K…, or any ID labelled "passport" |
+| Date of birth | dates labelled "birth", "DOB" or "lahir" |
+| Company reg. no. | 202001012345, 1234567-K, LLP0012345-LGN (a 12-digit number next to "Sdn Bhd / SSM / company" counts as a company number, next to "IC / NRIC / MyKad" as an NRIC) |
+| Name | only after a label ("Name:", "Nama:", "Holder:", "Tenant:", "Landlord:", "Penyewa:"…), a title (Encik, Puan, Cik, Mr, Mrs, Dr, Dato'…) or with bin/binti/a/l/a/p. "Bank name:" or "Company name:" are ignored |
+| Address | after "Address:" / "Alamat:" / "Premises:", or street lines (Jalan, Taman, Lorong…) ending with a postcode and town, e.g. 52100 Kepong, KL |
+| Vehicle plate (off by default) | WXY 1234, VAB 123 C. Never amounts like RM 2700. By default only next to a label like "vehicle", "kenderaan" or "plate" (see Settings) |
+| Custom pattern | your own regular expression, e.g. `EMP-\d{5}` |
+
+How the review works:
+- **Amber dashed box**: will be redacted.
+- **Grey striped box**: skipped (out of scope); it stays visible.
+- Untick a row, or tap its box on the page, to skip it. Nothing is changed until you tap **Redact**.
+- **Repeats:** every detail Auto Detect finds is also searched for across the whole document, so a name found next to "Tenant:" on page 7 is also caught on the cover page where it has no label. These show as e.g. "Name · repeat".
+- Scanning again only offers items that aren't redacted yet.
+- **Redacted** tab: everything you redacted from Find or Auto Detect. Untick an item to remove its black box again, or tick it to put it back. It stays available until you close the document.
+- The **By type** tab groups results (e.g. "Vehicle plate 3"). Tap a type to include or skip all of it, or **×** to remove it from the results.
+- On small screens, tap or drag the handle at the top of the panel (or its title) to shrink it to a bar and see more of the page.
+
+> Auto Detect is a helper, not a guarantee. Names without a label and unusual address layouts can be missed. Always look over every page before exporting, and use **Find** for anything it misses.
+
+## 5. Export a redacted copy
+Tap **Export** in the bottom bar. Your choices are remembered for next time. First pick a method:
+
+- **Keep original text** (recommended): Umbra removes the text, shapes and image parts under your boxes from the file itself and keeps everything else as it was. The copy looks exactly like the original, stays small, and all visible text can still be selected and searched. Filled-in form fields stay visible as normal text but are no longer editable. Links, attachments, comments and file details are removed.
+- **Image only** (maximum safety): every page becomes a picture with the boxes burned in. Nothing else from the original file is kept. Files are larger, and text can only be searched with the OCR option below.
+
+Image only options:
+- **Quality**: 300 DPI ("High") is recommended. Lower means a smaller file and faster export. 600 DPI ("Print") makes each page four times larger, so exporting takes noticeably longer and uses more memory.
+- **Compression**: "Sharp (best for text)" is lossless (grey pages are stored compactly); "Photo (JPEG)" suits pages that are mostly photos.
+- **Keep text selectable & searchable (OCR)**: on by default. When on, Umbra reads the *visible* text of each finished page on your device and adds an invisible text layer, so the saved PDF can be searched and copied from like a normal PDF. Blacked-out parts are never included, because the text is read from the already-blacked-out image, and words touching a black box are dropped too. It takes longer, and recognition can make small mistakes in the selectable text (the page image itself is unaffected).
+
+### What happens when you save
+1. **Keep original text:** everything under each box is deleted from the PDF and a black box is drawn in its place; the file is then rebuilt from scratch without links, forms, attachments, scripts, hidden descriptions or file details. **Image only:** every page is turned into a picture with your black boxes burned in, and a brand-new PDF is built from those pictures.
+2. Umbra then checks the new file automatically: no copyable text under the boxes (or none at all, if searchable mode is off), no fonts except the plain one used for the searchable layer, no links, forms, attachments or extra file details, and OCR finds nothing readable inside the black boxes.
+3. If every check passes you'll see **Safe to share**, then **Save PDF** opens the system save dialog. If anything fails, Umbra **does not save** the file.
+
+## 6. Going back
+The Android **Back** button closes an open dialog or panel first, then returns to the start screen. If you have redactions that haven't been exported, Umbra asks before leaving.
+
+## 7. Settings
+- **Appearance**: System (default), Light or Dark.
+- **Preferences**:
+  - **Close the panel after Redact** (on)
+  - **Ask before leaving unsaved work** (on)
+  - **Remind me to check every page** (on): a reminder in the Export sheet
+  - **Vehicle plates only when labelled** (on): fewer false matches
+  - **Hide content in Recent apps** (off): blanks the app-switcher preview; this also blocks screenshots. It applies from the moment the app opens. On the Android emulator, the emulator's own screenshot and recording buttons capture the screen from outside Android and are not blocked; test it on a real phone or through the Recent apps screen.
+- **Show technical check report** (Advanced): shows the full verification details after saving, for IT staff or troubleshooting. The checks always run; this only controls what you see.
+
+## Privacy
+- No internet permission, no accounts, no analytics, no ads.
+- Temporary copies of opened files are stored in the app's private cache and deleted when you're done.
+- Settings (theme, detector choices, custom patterns) are stored privately on the device and are not backed up. If you type a real name into a custom pattern, it stays on the phone.
+- Screenshots are allowed, so the document can also appear in the Recent apps preview.

@@ -1,0 +1,27 @@
+{
+  "name": "umbra-core",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && node scripts/copy-vendor.mjs",
+    "test": "node tests/e2e.mjs",
+    "sync:android": "node scripts/sync-android.mjs",
+    "build:android": "npm run build && npm run sync:android"
+  },
+  "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
+    "mupdf": "1.28.0",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "6.3.289",
+    "tesseract.js": "6.0.1",
+    "tesseract.js-core": "6.0.0"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1",
+    "typescript": "5.8.3",
+    "vite": "6.4.3"
+  }
+}

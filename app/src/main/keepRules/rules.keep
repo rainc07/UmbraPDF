@@ -1,0 +1,4 @@
+# Methods called from JavaScript via addJavascriptInterface must survive R8.
+-keepclassmembers class app.umbrapdf.UmbraBridge {
+    @android.webkit.JavascriptInterface <methods>;
+}

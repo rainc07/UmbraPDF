@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light (default). Dark values live in values-night/colors.xml. Keep in sync with core/src/ui/styles.css. -->
+    <color name="umbra_bg">#FFF4F3EF</color>
+    <color name="umbra_accent">#FFE09A1A</color>
+    <!-- Splash is always dark (brand), in both themes. -->
+    <color name="umbra_splash">#FF111214</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

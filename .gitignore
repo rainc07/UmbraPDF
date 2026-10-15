@@ -1,0 +1,31 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/core/node_modules
+/core/dist
+
+# Signing secrets: never commit
+*.jks
+*.keystore
+keystore.properties
+
+# Build outputs / IDE
+*.apk
+*.aab
+.kotlin/
+.idea/
+
+# Third-party scan, not redistributable
+samples/for OCR.pdf
