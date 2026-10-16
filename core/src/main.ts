@@ -8,6 +8,8 @@ import {
 } from './engine';
 import { lastOcrStats, resetOcrStats, setOcrEngine, warmUpOcr } from './engine/ocr';
 import { detectHost, type OpenedFile } from './platform/host';
+import { keepWorkingWhenHidden } from './platform/background';
+keepWorkingWhenHidden();
 
 const host = detectHost();
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySelector(s) as T;
@@ -946,10 +948,16 @@ async function withRepeats(found: Hit[]): Promise<Hit[]> {
  */
 async function prefetchText(cache: PageTextCache) {
   await new Promise((r) => setTimeout(r, 300)); // let the first pages paint
-  for (let i = 0; i < cache.doc.numPages; i++) {
-    if (S.texts !== cache) return; // another document was opened
-    try { await cache.get(i); } catch { return; }
-  }
+  // Two pages in flight: the next page is rendered and laid out while the current one is being read.
+  let next = 0;
+  const lane = async () => {
+    while (next < cache.doc.numPages) {
+      const i = next++;
+      if (S.texts !== cache) return; // another document was opened
+      try { await cache.get(i); } catch { return; }
+    }
+  };
+  await Promise.all([lane(), lane()]);
 }
 
 /**
@@ -1040,7 +1048,7 @@ function openFind() {
   if (!S.doc) return;
   closePanel('replace');
   S.panel = 'find';
-  showPanel(`<div class="ph"><b>Find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
+  showPanel(`<div class="ph"><b>Manual find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
     <form class="prow" id="f-form"><input id="f-q" type="search" placeholder="Word or phrase" enterkeyhint="search" autocomplete="off">
       <button class="primary" data-busy>Find</button></form>
     <div class="chips"><button class="chip" id="f-case" aria-pressed="false">Match case</button><button class="chip" id="f-word" aria-pressed="false">Whole word</button></div>
@@ -1076,7 +1084,7 @@ function openDetect() {
   closePanel('replace');
   S.panel = 'detect';
   const dp = prefs.detect;
-  showPanel(`<div class="ph"><b>Find personal details</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
+  showPanel(`<div class="ph"><b>Auto find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
     <div class="prow"><button id="d-go" class="primary" data-busy>Scan document</button></div>
     <p class="hint intro">Finds IC numbers, phones, emails, accounts, addresses and labelled names. Nothing is redacted until you confirm. Use Find for anything it misses.</p>
     <div id="p-status" class="hint" role="status"></div><div id="p-results"></div>

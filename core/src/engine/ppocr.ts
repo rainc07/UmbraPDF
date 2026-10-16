@@ -238,7 +238,7 @@ const cardSize = (q: Quad): [number, number] => {
 const CARD_WORD = /^(?:KAD|PENGENALAN|MALAYSIA|WARGANEGARA|IDENTITY|PENDUDUK|KETUA|PENGARAH|PENDAFTARAN|MYKAD|MYPR|MYKID|MYKAS)$/i;
 const PAGE_LIMIT = 1600;
 /** Text detection on a card runs at this width (card text is large); recognition still uses the full-size copy. */
-const CARD_DET_LIMIT = 640;
+const CARD_DET_LIMIT = 960;
 
 /**
  * Read a page (or a picture) with PaddleOCR. Cards are found first (no OCR) and each is read upright at its
@@ -306,30 +306,45 @@ export async function ppocrPage(
   return words;
   })();
 
-  // Cards are read concurrently: detection queues on the first engine while others recognise.
-  const cardReads = quads.map(async (q) => {
-    const [cw, ch] = cardSize(q);
-    const tw = performance.now();
-    const crop = warpQuad(canvas, q, cw, ch);
-    ppStats.log.push(`warp card ${cw}x${ch}: ${Math.round(performance.now() - tw)} ms`);
-    let lines: PpLine[];
-    try { lines = await readLines(crop, CARD_DET_LIMIT); } finally { crop.width = crop.height = 0; }
-    let ws = linesToWords(lines);
-    const isCard = ws.some((w) => CARD_WORD.test(w.text.replace(/[^\p{L}]/gu, ''))) || ws.some((w) => /\d{6}-?\d{2}-?\d{4}/.test(w.text));
-    // Card upside down? Most lines then needed the 180° turn: re-frame so the card's own reading order holds.
-    let qq = q;
+  // Candidate regions are read concurrently. Each is first read as it is, at its own resolution (most are
+  // plain text blocks, or upright cards from a scanner app). Only a tilted or skewed card is then read again,
+  // warped upright.
+  const isCardText = (ws: OcrWord[]) => ws.some((w) => CARD_WORD.test(w.text.replace(/[^\p{L}]/gu, ''))) || ws.some((w) => /\d{6}-?\d{2}-?\d{4}/.test(w.text));
+  const upright = (q: Quad) => {
+    const a = Math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0]), b = Math.atan2(q[2][1] - q[3][1], q[2][0] - q[3][0]);
+    return Math.abs(a) < 0.05 && Math.abs(b) < 0.05 && Math.abs(q[0][0] - q[3][0]) < 0.05 * (q[1][0] - q[0][0]);
+  };
+  /** Card words in the card's own frame (cw×ch): upside-down fix, capitals, unread-IC placeholder; then to page. */
+  const asCard = (lines: PpLine[], q: Quad, cw: number, ch: number): OcrWord[] => {
+    let qq = q, ls = lines;
     const upside = lines.filter((l) => l.quad[0][1] > l.quad[3][1]).length;
     if (lines.length && upside > lines.length / 2) {
       qq = turnQuad(q, 2);
-      const flip = (l: PpLine): PpLine => ({ ...l, quad: l.quad.map(([x, y]) => [cw - x, ch - y] as P) });
-      ws = linesToWords(lines.map(flip));
+      ls = lines.map((l) => ({ ...l, quad: l.quad.map(([x, y]) => [cw - x, ch - y] as P) }));
     }
-    if (isCard) {
-      // MyKad-family cards are printed in capitals; a mixed-case reading is the OCR's guess.
-      ws = ws.map((w) => ({ ...w, text: w.text.toUpperCase(), symbols: w.symbols.map((s) => ({ ...s, text: s.text.toUpperCase() })) }));
-      ws = onCardWords(ws, cw, ch);
-    }
+    // MyKad-family cards are printed in capitals; a mixed-case reading is the OCR's guess.
+    let ws = linesToWords(ls).map((w) => ({ ...w, text: w.text.toUpperCase(), symbols: w.symbols.map((s) => ({ ...s, text: s.text.toUpperCase() })) }));
+    ws = onCardWords(ws, cw, ch);
     return mapToPage(ws, qq, cw, ch);
+  };
+  const cardReads = quads.map(async (q) => {
+    const r = rect(q);
+    const x0 = Math.max(0, Math.floor(r.x0)), y0 = Math.max(0, Math.floor(r.y0));
+    const rw = Math.min(W, Math.ceil(r.x1)) - x0, rh = Math.min(H, Math.ceil(r.y1)) - y0;
+    const part = document.createElement('canvas');
+    part.width = rw; part.height = rh;
+    part.getContext('2d')!.drawImage(canvas, x0, y0, rw, rh, 0, 0, rw, rh);
+    let plain: PpLine[];
+    try { plain = await readLines(part, Math.min(PAGE_LIMIT, Math.max(rw, rh))); } finally { part.width = part.height = 0; }
+    const ws = linesToWords(plain);
+    const box0: Quad = [[x0, y0], [x0 + rw, y0], [x0 + rw, y0 + rh], [x0, y0 + rh]];
+    if (!isCardText(ws)) return mapToPage(ws, box0, rw, rh); // ordinary text
+    if (upright(q)) return asCard(plain, box0, rw, rh);
+    const [cw, ch] = cardSize(q);
+    const crop = warpQuad(canvas, q, cw, ch);
+    let lines: PpLine[];
+    try { lines = await readLines(crop, CARD_DET_LIMIT); } finally { crop.width = crop.height = 0; }
+    return asCard(lines, q, cw, ch);
   });
   const [restWords, cards] = await Promise.all([restRead, Promise.all(cardReads)]);
   const words = [...restWords];

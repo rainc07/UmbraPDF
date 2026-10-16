@@ -525,6 +525,32 @@ check(V.size < V.imgSize / 3, `vector: much smaller than image export (${(V.size
 check(external.length === 0, `no external network requests ${external.join(', ')}`);
 check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')}`);
 
+// ---------- Scanned names whose words the text detector may split ("Tan Chee" + "Kin") ----------
+{
+  const rows = [['Tan Chee', 'Kin', 0, 30], ['Tan Chee', 'Kin', 4, 40], ['Tan Chee', 'Kin', 8, 25], ['Tan Chee', 'Kin', 0, 60], ['Name: Tan', 'Chee Kin', 0, 35]];
+  const img = await page.evaluate(async (rows) => {
+    const c = document.createElement('canvas'); c.width = 1654; c.height = 2339; const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#111'; g.font = '30px serif';
+    const ends = [];
+    rows.forEach(([a, b, dy, gap], i) => {
+      g.fillText(a, 150, 200 + i * 60);
+      const x = 150 + g.measureText(a).width + gap;
+      g.fillText(b, x, 200 + i * 60 + dy);
+      ends.push((x + g.measureText(b).width) * 595 / 1654); // right end of the name, in points
+    });
+    const bl = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+    return { jpeg: Array.from(new Uint8Array(await bl.arrayBuffer())), ends };
+  }, rows);
+  const d = await PDFDocument.create(); const p = d.addPage([595, 842]);
+  p.drawImage(await d.embedJpg(Uint8Array.from(img.jpeg)), { x: 0, y: 0, width: 595, height: 842 });
+  const hits = await page.evaluate(async (b) => {
+    const T = window.__umbraTest; await T.load(new Uint8Array(b));
+    return (await T.detect(['name'])).map((h) => ({ text: h.text, x1: Math.max(...h.rects.map((r) => r.x + r.w)), y: h.rects[0].y }));
+  }, Array.from(await d.save()));
+  hits.sort((a, b) => a.y - b.y);
+  rows.forEach((_, i) => check(hits[i]?.text === 'Tan Chee Kin' && hits[i].x1 >= img.ends[i] - 1, `scanned name with a split line ${i + 1}: "${hits[i]?.text}" covers the whole name (${Math.round(hits[i]?.x1 ?? 0)} >= ${Math.round(img.ends[i])})`));
+}
+
 await browser.close();
 server.close();
 console.log(failed ? `\n${failed} check(s) failed` : '\nALL CHECKS PASSED');

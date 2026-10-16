@@ -210,9 +210,40 @@ async function recognise(strips: Float32Array[], widths: number[]): Promise<PpRe
 }
 
 /** Detect lines and cut each into a normalised strip (height 48), ready for recognition on any worker. */
+/**
+ * Join boxes the detector split within one line of text ("Tan Chee" + "Kin"): level boxes that share most
+ * of their height and are less than 1.5 line-heights apart become one box. Otherwise the line reads in
+ * pieces (a name cut short, or a neighbour's letter read into the next box).
+ */
+function mergeLine(qs: P[][]): P[][] {
+  type B = { x0: number; y0: number; x1: number; y1: number; q: P[]; level: boolean };
+  const bs: B[] = qs.map((q) => {
+    const xs = q.map((p) => p[0]), ys = q.map((p) => p[1]);
+    const a = Math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0]);
+    return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys), q, level: Math.abs(a) < 0.1 && dist(q[0], q[1]) >= dist(q[0], q[3]) };
+  });
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < bs.length && !changed; i++) for (let j = 0; j < bs.length && !changed; j++) {
+      const a = bs[i], b = bs[j];
+      if (i === j || !a.level || !b.level || a.x0 > b.x0) continue;
+      const ha = a.y1 - a.y0, hb = b.y1 - b.y0;
+      const ov = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+      if (ov < 0.6 * Math.min(ha, hb) || Math.max(ha, hb) > 1.6 * Math.min(ha, hb)) continue;
+      if (b.x0 - a.x1 > 1.5 * Math.max(ha, hb)) continue;
+      const m: B = { x0: a.x0, y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1), q: [], level: true };
+      m.q = [[m.x0, m.y0], [m.x1, m.y0], [m.x1, m.y1], [m.x0, m.y1]];
+      bs.splice(Math.max(i, j), 1); bs.splice(Math.min(i, j), 1); bs.push(m);
+      changed = true;
+    }
+  }
+  return bs.map((b) => b.q);
+}
+
 async function detectStrips(img: ImageData, limit: number) {
   const { quads } = await detect(img, limit);
-  const qs = quads.map(readingOrder);
+  const qs = mergeLine(quads).map(readingOrder);
   const widths = qs.map((q) => Math.min(2400, Math.max(16, Math.round((48 * Math.max(dist(q[0], q[1]), 1)) / Math.max(dist(q[0], q[3]), 1)))));
   return { quads: qs, widths, strips: qs.map((q, i) => strip(img, q, widths[i])) };
 }

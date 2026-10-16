@@ -13,7 +13,7 @@ With a document open, **Find**, **Auto Detect** and **Export** are at the top ri
 - Switch to **Scroll** to move around the page without drawing.
 - **Zoom:** pinch with two fingers (works in Redact mode too; two fingers never draw a box), double-tap to switch between fit-to-width and close-up, or use **−** / **+**. On a computer, Ctrl + mouse wheel or a trackpad pinch also zoom.
 
-## 3. Find & redact (search)
+## 3. Manual find & redact (search)
 Tap **Find**, type a word or phrase, and tap **Find**.
 - **Match case**: only matches the exact upper/lower case.
 - **Whole word**: `ali` finds "Ali" but not "Alice".
@@ -22,7 +22,7 @@ Tap **Find**, type a word or phrase, and tap **Find**.
 - Matches that are already fully redacted aren't offered again, so nothing gets redacted twice.
 - Scanned pages (photos or scans with no real text) are read with on-device text recognition (OCR) first, so the first search is slower.
 
-## 4. Find personal details automatically
+## 4. Auto find & redact (personal details)
 Tap **Auto Detect**, then **Scan document** at the top. **Advanced config** (collapsed by default) lets you turn detectors on or off and add custom patterns.
 
 | Detector | Examples |

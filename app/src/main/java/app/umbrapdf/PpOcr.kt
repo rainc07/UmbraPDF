@@ -138,6 +138,37 @@ class PpOcr(private val load: (String) -> ByteArray) {
         return out
     }
 
+    /**
+     * Join boxes the detector split within one line of text ("Tan Chee" + "Kin"): level boxes sharing most of
+     * their height and less than 1.5 line-heights apart become one (same rule as ppocr.worker.ts).
+     */
+    private fun mergeLine(qs: List<Array<Pt>>): List<Array<Pt>> {
+        class B(val x0: Float, val y0: Float, val x1: Float, val y1: Float, val q: Array<Pt>, val level: Boolean)
+        val bs = qs.map { q ->
+            val a = atan2(q[1].y - q[0].y, q[1].x - q[0].x)
+            B(q.minOf { it.x }, q.minOf { it.y }, q.maxOf { it.x }, q.maxOf { it.y }, q,
+                kotlin.math.abs(a) < 0.1f && dist(q[0], q[1]) >= dist(q[0], q[3]))
+        }.toMutableList()
+        var changed = true
+        while (changed) {
+            changed = false
+            loop@ for (i in bs.indices) for (j in bs.indices) {
+                val a = bs[i]; val b = bs[j]
+                if (i == j || !a.level || !b.level || a.x0 > b.x0) continue
+                val ha = a.y1 - a.y0; val hb = b.y1 - b.y0
+                val ov = min(a.y1, b.y1) - max(a.y0, b.y0)
+                if (ov < 0.6f * min(ha, hb) || max(ha, hb) > 1.6f * min(ha, hb)) continue
+                if (b.x0 - a.x1 > 1.5f * max(ha, hb)) continue
+                val x0 = a.x0; val y0 = min(a.y0, b.y0); val x1 = max(a.x1, b.x1); val y1 = max(a.y1, b.y1)
+                val m = B(x0, y0, x1, y1, arrayOf(Pt(x0, y0), Pt(x1, y0), Pt(x1, y1), Pt(x0, y1)), true)
+                bs.removeAt(max(i, j)); bs.removeAt(min(i, j)); bs.add(m)
+                changed = true
+                break@loop
+            }
+        }
+        return bs.map { it.q }
+    }
+
     // ---------- recognition ----------
     private fun dist(a: Pt, b: Pt) = hypot(a.x - b.x, a.y - b.y)
 
@@ -224,7 +255,7 @@ class PpOcr(private val load: (String) -> ByteArray) {
         val load = ensureLoaded()
         val img = Img(w, h, px, off)
         val t0 = System.nanoTime()
-        val quads = detect(img, limit).map { readingOrder(it) }.toMutableList()
+        val quads = mergeLine(detect(img, limit)).map { readingOrder(it) }.toMutableList()
         val widths = IntArray(quads.size) { i ->
             val q = quads[i]
             (48f * max(dist(q[0], q[1]), 1f) / max(dist(q[0], q[3]), 1f)).roundToInt().coerceIn(16, 2400)
