@@ -23,9 +23,15 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import org.json.JSONObject
+import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import java.io.ByteArrayInputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.Executors
 
 /**
  * Thin shell: one WebView hosting the bundled web core. No network, no file:// access.
@@ -47,6 +53,8 @@ class MainActivity : ComponentActivity() {
     private val createDoc = registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         bridge.finishSave(uri)
     }
+
+    private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     fun launchOpen() = openDoc.launch(arrayOf("application/pdf"))
     fun launchCreate(name: String) = createDoc.launch(name)
@@ -75,6 +83,88 @@ class MainActivity : ComponentActivity() {
         c.isAppearanceLightStatusBars = !dark
         c.isAppearanceLightNavigationBars = !dark
     }
+
+    // ---- Native OCR (PaddleOCR on ONNX Runtime), reached from JS as window.UmbraOcr (WebMessageListener) ----
+    private lateinit var ocr: PpOcr
+    private val ocrExec = Executors.newSingleThreadExecutor()
+    @Volatile var nativeOcr = false
+        private set
+    @Volatile var nativeOcrBinary = false
+        private set
+
+    private fun installOcr() {
+        val assets = applicationContext.assets
+        ocr = PpOcr { n -> assets.open("web/vendor/ppocr/$n").use { it.readBytes() } }
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
+        nativeOcrBinary = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)
+        WebViewCompat.addWebMessageListener(web, "UmbraOcr", setOf("https://$HOST")) { _, message, _, isMainFrame, reply ->
+            if (!isMainFrame) return@addWebMessageListener
+            val bin = if (nativeOcrBinary && message.type == WebMessageCompat.TYPE_ARRAY_BUFFER) message.arrayBuffer else null
+            val str = if (message.type == WebMessageCompat.TYPE_STRING) message.data else null
+            ocrExec.execute {
+                val json = ocrRequest(bin, str)
+                runOnUiThread { reply.postMessage(json) }
+            }
+        }
+        nativeOcr = true
+    }
+
+    /**
+     * Binary request: little-endian int32 header [id, width, height, detLimit] + RGBA pixels.
+     * String request: {"id", "kind":"warm"} to load the models, or {"id","w","h","limit","b64"} (no ArrayBuffer support).
+     */
+    private fun ocrRequest(bin: ByteArray?, str: String?): String {
+        var id = 0
+        return try {
+            if (bin != null) {
+                val h = ByteBuffer.wrap(bin, 0, 16).order(ByteOrder.LITTLE_ENDIAN)
+                id = h.int
+                val w = h.int; val hh = h.int; val limit = h.int
+                require(bin.size >= 16 + w * hh * 4) { "short image" }
+                ocr.run(id, w, hh, limit, bin, 16)
+            } else {
+                val j = JSONObject(str ?: "{}")
+                id = j.optInt("id")
+                if (j.optString("kind") == "warm") {
+                    val ms = ocr.ensureLoaded()
+                    JSONObject().put("id", id).put("ok", true).put("load", ms).put("threads", ocr.threads).toString()
+                } else {
+                    val px = android.util.Base64.decode(j.getString("b64"), android.util.Base64.DEFAULT)
+                    ocr.run(id, j.getInt("w"), j.getInt("h"), j.getInt("limit"), px, 0)
+                }
+            }
+        } catch (e: Throwable) {
+            JSONObject().put("id", id).put("ok", false).put("error", e.toString()).toString()
+        }
+    }
+
+    // ---- Background work + notifications ----
+    @Volatile var visible = false
+        private set
+    private var workTitle = ""
+
+    fun workStart(title: String) {
+        workTitle = title
+        WorkService.clearDone(this)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !getSharedPreferences("umbra", MODE_PRIVATE).getBoolean("askedNotify", false)
+        ) {
+            getSharedPreferences("umbra", MODE_PRIVATE).edit().putBoolean("askedNotify", true).apply()
+            askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        WorkService.start(this, title)
+    }
+
+    fun workProgress(text: String, pct: Int) = WorkService.progress(this, workTitle, text, pct)
+
+    fun workDone(title: String, text: String) {
+        WorkService.stop(this)
+        if (!visible) WorkService.done(this, title, text)
+    }
+
+    override fun onResume() { super.onResume(); visible = true; WorkService.clearDone(this) }
+    override fun onPause() { visible = false; super.onPause() }
 
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,6 +215,10 @@ class MainActivity : ComponentActivity() {
             }
             addJavascriptInterface(bridge, "UmbraAndroid")
         }
+        // Keep the page's renderer at full priority while the app is in the background (scans keep going).
+        if (Build.VERSION.SDK_INT >= 26) web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        WorkService.channels(this)
+        installOcr()
         // WebView ignores its own padding, so insets go on a container around it.
         val root = FrameLayout(this).apply { addView(web) }
         setContentView(root)
@@ -178,6 +272,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        WorkService.stop(this)
+        ocrExec.shutdownNow()
         bridge.shutdown()
         store.clear()
         web.destroy()

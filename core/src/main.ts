@@ -2,7 +2,7 @@ import './ui/styles.css';
 import {
   openPdf, closePdf, pageSizes, renderToCanvas, exportRedacted, verifyOutput, ocrRedactedRegions,
   PasswordRequiredError, DEFAULT_EXPORT,
-  PageTextCache, searchDocument, exportVector, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
+  PageTextCache, pageTextWords, searchDocument, exportVector, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
   type Hit, type SearchPattern, type CustomPattern,
 } from './engine';
@@ -143,6 +143,7 @@ async function loadFile(file: OpenedFile) {
   S.sugg = [];
   S.texts = new PageTextCache(doc);
   warmUpOcr(); // load the OCR engine now, while the user looks at the document
+  void prefetchText(S.texts);
   closePanel();
   S.zoom = fitZoom();
   buildPages();
@@ -939,13 +940,40 @@ async function withRepeats(found: Hit[]): Promise<Hit[]> {
   return out.sort((a, b) => a.page - b.page || a.start - b.start);
 }
 
+/**
+ * Read every page's text in the background as soon as a document is open (OCR for scanned pages), so
+ * Auto Detect, Find and the copy-ready export find it done. Same cache: a scan just waits for pages in progress.
+ */
+async function prefetchText(cache: PageTextCache) {
+  await new Promise((r) => setTimeout(r, 300)); // let the first pages paint
+  for (let i = 0; i < cache.doc.numPages; i++) {
+    if (S.texts !== cache) return; // another document was opened
+    try { await cache.get(i); } catch { return; }
+  }
+}
+
+/**
+ * Long work that should survive leaving the app: after 1.5 s the host keeps it alive with a progress
+ * notification, and says when it's done (only if the user isn't looking). Short work shows nothing.
+ */
+function startWork(title: string) {
+  let started = false;
+  const timer = window.setTimeout(() => { started = true; host.workStart?.(title); }, 1500);
+  return {
+    progress: (text: string, f: number) => { if (started) host.workProgress?.(text, f); },
+    done: (t: string, text: string) => { window.clearTimeout(timer); if (started) host.workDone?.(t, text); },
+  };
+}
+let work: ReturnType<typeof startWork> | null = null;
+
 async function runScan(patterns: SearchPattern[], what: string, repeats = false) {
   if (!S.texts || S.busy) return;
   S.busy = true; syncToolbar();
   try {
     resetOcrStats();
+    work = startWork(`Scanning ${what}`);
     const t0 = performance.now();
-    let all = await searchDocument(S.texts, patterns, (m) => status(m));
+    let all = await searchDocument(S.texts, patterns, (m, f) => { status(m); work?.progress(m.replace(/:.*/, ''), f); });
     const t1 = performance.now();
     if (repeats) all = await withRepeats(all);
     lastOcrStats.log.push(`scan: read+match ${Math.round(t1 - t0)} ms, repeats ${Math.round(performance.now() - t1)} ms`);
@@ -959,7 +987,10 @@ async function runScan(patterns: SearchPattern[], what: string, repeats = false)
     status(hits.length ? `Found ${hits.length} ${what} on ${pages} page(s)${secs}.${doneMsg} Untick anything to keep, then tap Redact.`
       : done ? `Everything found (${done}) is already redacted.` : `No ${what} found${secs}.`);
     showTimings();
+    work?.done('Scan finished', hits.length ? `${hits.length} item(s) found. Ready to review.` : 'Nothing found. Ready to review.');
+    work = null;
   } catch (e) {
+    work?.done('Scan stopped', 'Something went wrong. Open Umbra PDF for details.'); work = null;
     status(`Failed: ${(e as Error).message}`);
     toast((e as Error).message, 5000);
   } finally {
@@ -1112,7 +1143,7 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
   const lap = (name: string) => { const t = performance.now(); timings.push([name, t - t0]); t0 = t; };
   const res = method === 'vector'
     ? { bytes: await exportVector(S.bytes!, S.password, S.boxes, onProgress), downscaled: [], ocrWords: 0 }
-    : await exportRedacted(S.doc, S.boxes, opts, onProgress);
+    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.get(i).then((pt) => (pt.source === 'ocr' ? pageTextWords(pt) : null)) : undefined);
   lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
   const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
   lap('Structure check');
@@ -1193,14 +1224,18 @@ function exportDialog() {
     prefs.export = { dpi: opts.dpi, format: opts.format, searchable: opts.searchable, method }; savePrefs();
     modal(`<h2>Preparing your copy…</h2><p id="x-msg" class="hint">Starting</p><progress id="x-bar" max="1" value="0"></progress>`);
     S.busy = true; syncToolbar();
+    const w = startWork('Preparing your redacted copy');
     try {
       const out = await runExport({ ...opts, searchable: method === 'image' && opts.searchable }, true, (m, f) => {
         const msg = document.getElementById('x-msg'); if (msg && prefs.advanced) msg.textContent = m;
         else if (msg) msg.textContent = f < 1 ? 'Making the pages…' : 'Checking it\'s safe…';
         const bar = document.getElementById('x-bar') as HTMLProgressElement | null; if (bar) bar.value = f;
+        w.progress(f < 1 ? 'Making the pages' : 'Checking it\'s safe', f);
       }, method);
+      w.done(out.report.ok ? 'Ready to save' : 'Not saved, to keep you safe', out.report.ok ? 'Your redacted copy passed the safety check. Tap to save it.' : 'The final check found a problem. Open Umbra PDF for details.');
       resultDialog(out);
     } catch (e) {
+      w.done('Export stopped', 'Something went wrong. Open Umbra PDF for details.');
       const hidden = (e as Error).name === 'HiddenLayersError';
       modal(`<div class="big-icon bad">${ICON_BAD}</div><h2>${hidden ? 'This PDF has hidden layers' : 'Something went wrong'}</h2>
         <p class="hint">${hidden

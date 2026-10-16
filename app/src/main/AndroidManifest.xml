@@ -1,11 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!--
       Deliberately NO <uses-permission android:name="android.permission.INTERNET" />.
       Without it the OS denies all socket access to this app, including the WebView.
       File access goes through the Storage Access Framework, so no storage permission either.
     -->
+    <!-- ...and make sure no library (e.g. a runtime dependency) slips it in through manifest merging. -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+
+    <!-- Background work (scan / export keep running when you switch apps) and its notifications.
+         Notifications show only generic status, never document content. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
 
     <application
         android:allowBackup="false"
@@ -37,6 +48,10 @@
                 <data android:scheme="content" android:mimeType="application/pdf" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".WorkService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|mediaProcessing" />
     </application>
 
 </manifest>

@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+package app.umbrapdf
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.ServiceCompat
+
+/**
+ * Keeps the app running while it scans or prepares a file in the background (the user switched apps),
+ * with an ongoing "working" notification. When the work finishes, a normal notification says it's ready.
+ * Notifications never contain document content: only generic text such as "12 items found".
+ */
+class WorkService : Service() {
+    companion object {
+        private const val CH_WORK = "work"
+        private const val CH_DONE = "done"
+        private const val ID_WORK = 1
+        private const val ID_DONE = 2
+        private const val EXTRA_TITLE = "title"
+        private const val EXTRA_TEXT = "text"
+        private const val EXTRA_PCT = "pct"
+
+        fun channels(ctx: Context) {
+            if (Build.VERSION.SDK_INT < 26) return
+            val nm = ctx.getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(NotificationChannel(CH_WORK, ctx.getString(R.string.ch_work), NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CH_DONE, ctx.getString(R.string.ch_done), NotificationManager.IMPORTANCE_DEFAULT))
+        }
+
+        private fun openApp(ctx: Context): PendingIntent = PendingIntent.getActivity(
+            ctx, 0, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+
+        fun working(ctx: Context, title: String, text: String, pct: Int): Notification =
+            NotificationCompat.Builder(ctx, CH_WORK)
+                .setSmallIcon(R.drawable.ic_stat_umbra)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setProgress(100, pct.coerceIn(0, 100), pct < 0)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .setContentIntent(openApp(ctx))
+                .build()
+
+        fun start(ctx: Context, title: String) {
+            val i = Intent(ctx, WorkService::class.java).putExtra(EXTRA_TITLE, title).putExtra(EXTRA_TEXT, "").putExtra(EXTRA_PCT, -1)
+            try { androidx.core.content.ContextCompat.startForegroundService(ctx, i) } catch (e: Exception) { /* not allowed now: work continues in the app */ }
+        }
+
+        fun progress(ctx: Context, title: String, text: String, pct: Int) {
+            if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return
+            try { NotificationManagerCompat.from(ctx).notify(ID_WORK, working(ctx, title, text, pct)) } catch (e: SecurityException) { }
+        }
+
+        fun stop(ctx: Context) { ctx.stopService(Intent(ctx, WorkService::class.java)) }
+
+        /** "Ready" notification; only shown when the user isn't looking at the app. */
+        fun done(ctx: Context, title: String, text: String) {
+            val n = NotificationCompat.Builder(ctx, CH_DONE)
+                .setSmallIcon(R.drawable.ic_stat_umbra)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setAutoCancel(true)
+                .setContentIntent(openApp(ctx))
+                .build()
+            try { NotificationManagerCompat.from(ctx).notify(ID_DONE, n) } catch (e: SecurityException) { }
+        }
+
+        fun clearDone(ctx: Context) = NotificationManagerCompat.from(ctx).cancel(ID_DONE)
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val n = working(this, intent?.getStringExtra(EXTRA_TITLE) ?: getString(R.string.app_name), intent?.getStringExtra(EXTRA_TEXT) ?: "", intent?.getIntExtra(EXTRA_PCT, -1) ?: -1)
+        val type = when {
+            Build.VERSION.SDK_INT >= 35 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+            Build.VERSION.SDK_INT >= 29 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            else -> 0
+        }
+        try { ServiceCompat.startForeground(this, ID_WORK, n, type) } catch (e: Exception) { stopSelf() }
+        return START_NOT_STICKY
+    }
+
+    /** Swiped away from Recents: nothing to resume, stop. */
+    override fun onTimeout(startId: Int, fgsType: Int) { stopSelf() }
+}

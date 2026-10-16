@@ -88,6 +88,23 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
         org.json.JSONObject(getPrefs().ifEmpty { "{}" }).optJSONObject("opts")?.optBoolean("hideRecents", false) ?: false
     } catch (e: Exception) { false }
 
+    // ---- Native OCR and background work ----
+
+    /** {"native":bool,"binary":bool}: whether window.UmbraOcr (native PaddleOCR) is available, and takes ArrayBuffers. */
+    @JavascriptInterface
+    fun ocrCaps(): String = JSONObject().put("native", activity.nativeOcr).put("binary", activity.nativeOcrBinary).toString()
+
+    /** Long work started (scan or export): keeps running with an ongoing notification if the user leaves the app. */
+    @JavascriptInterface
+    fun workStart(title: String) = activity.runOnUiThread { activity.workStart(title.take(80)) }
+
+    @JavascriptInterface
+    fun workProgress(text: String, pct: Int) = activity.runOnUiThread { activity.workProgress(text.take(120), pct) }
+
+    /** Work finished: a notification is shown only if the app isn't on screen. Text must not contain document content. */
+    @JavascriptInterface
+    fun workDone(title: String, text: String) = activity.runOnUiThread { activity.workDone(title.take(80), text.take(160)) }
+
     // ---- Called from MainActivity ----
 
     /** Copy a SAF/intent URI into the staging area and hand a same-origin URL to JS. */

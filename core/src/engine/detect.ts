@@ -155,7 +155,16 @@ const MY_ANCHORS = ['Muhammad', 'Muhamad', 'Mohammad', 'Mohamad', 'Mohamed', 'Mo
   'Nor', 'Noor', 'Siti', 'Nik', 'Megat', 'Syed', 'Sharifah', 'Syarifah', 'Puteri', 'Wan', 'Fatimah', 'Aminah', 'Aishah', 'Aisyah', 'Zainab',
   'Nurin', 'Nurhayati', 'Norazlina', 'Norhayati', 'Mohd.', 'Ahmad'];
 const alt = (ws: string[], caps: boolean) => [...new Set(ws)].map((w) => esc(caps ? w.toUpperCase() : w)).join('|');
-const cnName = (caps: boolean) => `(?:${alt(CN_SURNAMES, caps)})(?:[ -](?:${alt(CN_GIVEN, caps)})(?![\\p{L}])){1,2}`;
+/**
+ * Any romanised Chinese syllable (Hanyu Pinyin, Hokkien/Cantonese spellings): "Kiat", "Zheng", "Xuan", "Siew".
+ * Used only after a surname and a known given syllable, for names whose last part isn't in CN_GIVEN.
+ */
+const CN_SYL = '(?:[bcdfghjklmnpqrstwxyz]|ch|sh|zh|ng|kh|th|ts|ph)?h?[aeiouy]{1,3}(?:ng|n|m|k|t|p|h|w)?';
+const CN_SYL_STOP = /^(?:the|to|in|on|at|is|as|of|by|me|he|we|be|so|no|do|go|my|hi|oh|ok|she|see|pay|may|say|way|day|key|men|ten|net|set|let|get|bet|pet|hot|not|but|cut|put|run|sun|fun|man|can|pan|van|fan|ran|him|his|her|its|out|had|has|was|new|any|few|saw|two|who|why|how|now|yes|you|yet|job|ya|ta|tak|dan|ke|di|ini|itu|yang|pada|bin|binti|bt|a|an|i|o|u)$/i;
+const cnName = (caps: boolean) => {
+  const cap = caps ? `[A-Z]${CN_SYL.replace(/[a-z]/g, (c) => c.toUpperCase())}` : `[A-Z]${CN_SYL}`;
+  return `(?:${alt(CN_SURNAMES, caps)})(?:[ -](?:${alt(CN_GIVEN, caps)})(?![\\p{L}])){1,2}(?:[ -](?:${cap})(?![\\p{L}])){0,2}`;
+};
 /** Words before a Malay anchor that make it a place or institution, not a person ("Jalan Raja Muda", "Masjid Abdul..."). */
 const NOT_PERSON_BEFORE = /\b(?:jalan|jln|lorong|lrg|taman|tmn|masjid|sekolah|sk|smk|kolej|universiti|university|hospital|klinik|bangunan|wisma|menara|kampung|kg|persiaran|lebuh|surau|dewan|institut|pusat|stadium|bandar|pekan)\b(?:[ ]+[A-Z][\w'’.]*){0,3}[ ]*$/i;
 const personOk = (m: RegExpExecArray, text: string) => nameOk(m, text) && !NOT_PERSON_BEFORE.test(text.slice(Math.max(0, m.index - 30), m.index));
@@ -344,7 +353,13 @@ export const PRESETS: Preset[] = [
         accept: (m, t, pt) => nameOk(m, t) && columnHeader(/\b(?:name|nama|full\s+name|nama\s+penuh|holder|pemegang)\b/i)(m, t, pt) },
       // Common Malaysian names, no label needed: Chinese surname + given names, Malay anchor names.
       { regex: new RegExp(`(?<![\\p{L}])(?:${cnName(true)}|${cnName(false)})(?![\\p{L}])`, 'gu'),
-        accept: (m, t) => nameOk(m, t) && !/^(?:tan|puan)\s+sri\b/i.test(m[0]) && !/\b(?:tan|puan)\s*$/i.test(t.slice(Math.max(0, m.index - 6), m.index)) },
+        accept: (m, t) => nameOk(m, t) && !/^(?:tan|puan)\s+sri\b/i.test(m[0]) && !/\b(?:tan|puan)\s*$/i.test(t.slice(Math.max(0, m.index - 6), m.index)),
+        // Extra syllables after the known part ("Tan Chee Kiat") stop at ordinary words ("Tan Chee Kin to sign").
+        refine: (m) => {
+          const ws = m[0].split(/([ -])/);
+          while (ws.length > 3 && CN_SYL_STOP.test(ws[ws.length - 1])) ws.splice(-2, 2);
+          return { start: m.index, end: m.index + ws.join('').length };
+        } },
       { regex: new RegExp(`(?<![\\p{L}])(?:${alt(MY_ANCHORS, true)}|${alt(MY_ANCHORS, false)})(?:[ ]+${NAME_WORD}){1,4}(?![\\p{L}])`, 'gu'), accept: personOk },
       // ID card: the name lines right under the IC number.
       { regex: new RegExp(`(?<=(?:^|\\n)[^\\n]*\\d{6}[ ]?[-–]?[ ]?\\d{2}[ ]?[-–]?[ ]?\\d{4}[^\\n]*\\n(?:[^\\n]{0,8}\\n){0,2})${CARD_NAME_LINE}(?:\\n${CARD_NAME_LINE2}(?=[ \\t]*(?:\\n|$)))?`, 'gu'),

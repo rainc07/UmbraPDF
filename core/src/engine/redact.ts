@@ -3,7 +3,7 @@ import {
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject,
   beginText, endText, setFontAndSize, setTextRenderingMode, setCharacterSqueeze, setTextMatrix, showText,
 } from 'pdf-lib';
-import { recognizeWords, type OcrWord } from './ocr';
+import { recognizeWordsRobust, type OcrWord } from './ocr';
 import { renderToCanvas, type PDFDocumentProxy } from './pdf';
 import type { ExportOptions, ExportResult, Progress, RedactionMap, Rect } from './types';
 
@@ -148,6 +148,8 @@ export async function exportRedacted(
   redactions: RedactionMap,
   opts: ExportOptions,
   onProgress: Progress = () => {},
+  /** Already-read text of a page (page points), reused for the searchable layer instead of a new OCR pass. */
+  textFor?: (pageIndex: number) => Promise<OcrWord[] | null>,
 ): Promise<ExportResult> {
   const out = await PDFDocument.create({ updateMetadata: false });
   const downscaled: ExportResult['downscaled'] = [];
@@ -176,7 +178,19 @@ export async function exportRedacted(
       for (const b of boxesPx) ctx.fillRect(...b);
 
       let words: OcrWord[] = [];
-      if (opts.searchable) {
+      // Scanned pages: reuse the OCR text read for search/Auto Detect (read now if it wasn't yet), minus
+      // everything under a box. It came from the same pixels. Pages with a real text layer are read again
+      // from their pixels instead: their stored text can include text that isn't visible.
+      const known = opts.searchable && textFor ? await textFor(i - 1) : null;
+      if (known) {
+        onProgress(`Reading text on page ${i}/${n}`, (i - 0.75) / n);
+        const px = (v: number) => v * scale;
+        const pts = known;
+        words = visibleFragments(pts.map((w) => ({
+          ...w, x0: px(w.x0), y0: px(w.y0), x1: px(w.x1), y1: px(w.y1),
+          symbols: w.symbols.map((sy) => ({ ...sy, x0: px(sy.x0), y0: px(sy.y0), x1: px(sy.x1), y1: px(sy.y1) })),
+        })), boxesPx);
+      } else if (opts.searchable) {
         onProgress(`Reading text on page ${i}/${n}`, (i - 0.75) / n);
         // OCR a copy at most 300 DPI (4x fewer pixels at 600 DPI) with the boxes painted WHITE:
         // the hidden text is just as gone, but words next to a box are read cleanly instead of merging with it.
@@ -188,7 +202,7 @@ export async function exportRedacted(
         c2.drawImage(canvas, 0, 0, src.width, src.height);
         c2.fillStyle = '#fff';
         for (const b of boxesPx) c2.fillRect(Math.floor(b[0] * k) - 1, Math.floor(b[1] * k) - 1, Math.ceil(b[2] * k) + 2, Math.ceil(b[3] * k) + 2);
-        const raw = await recognizeWords(src, (m) => onProgress(m, (i - 0.75) / n), 0);
+        const raw = await recognizeWordsRobust(src, (m) => onProgress(m, (i - 0.75) / n));
         src.width = src.height = 0;
         const up = (v: number) => v / k;
         words = visibleFragments(k < 1 ? raw.map((w) => ({

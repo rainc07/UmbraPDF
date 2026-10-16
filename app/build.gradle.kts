@@ -24,6 +24,7 @@ android {
         targetSdk = 37
         versionCode = 2
         versionName = "1.1.0"
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     signingConfigs {
@@ -80,5 +81,15 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.webkit)
+    // Native PaddleOCR runtime (MIT). Only the 64-bit ARM (phones) and x86_64 (emulator) libraries are packed.
+    implementation(libs.onnxruntime.android)
     testImplementation(libs.junit)
+    // Unit tests run the same OCR code on the build machine with the desktop ONNX Runtime.
+    testImplementation(libs.onnxruntime.jvm)
+    testImplementation(libs.orgjson) // real org.json (android.jar only has stubs)
+}
+
+// The Android runtime can't load on the build machine: unit tests use the desktop one instead.
+configurations.matching { it.name.contains("UnitTestRuntimeClasspath") }.configureEach {
+    exclude(group = "com.microsoft.onnxruntime", module = "onnxruntime-android")
 }

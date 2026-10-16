@@ -34,9 +34,65 @@ function spawn(): Engine {
   return { w, queue: Promise.resolve() };
 }
 
+// ---------- native engine (Android: window.UmbraOcr, see PpOcr.kt) ----------
+interface NativePort { postMessage(m: string | ArrayBuffer): void; onmessage: ((e: { data: string }) => void) | null }
+type NativeReply = { id: number; ok: boolean; error?: string; lines?: PpLine[]; load?: number; threads?: number;
+  ms?: { load: number; det: number; rec: number; retry: number; lines: number; threads: number; flipped: boolean } };
+let native: { port: NativePort; binary: boolean } | null = null;
+let nativeOff = false;
+const nativePending = new Map<number, (r: NativeReply) => void>();
+
+function nativeCaps(): { port: NativePort; binary: boolean } | null {
+  const w = window as unknown as { UmbraOcr?: NativePort; UmbraAndroid?: { ocrCaps?(): string } };
+  if (!w.UmbraOcr || !w.UmbraAndroid?.ocrCaps) return null;
+  try {
+    const c = JSON.parse(w.UmbraAndroid.ocrCaps()) as { native: boolean; binary: boolean };
+    if (!c.native) return null;
+    w.UmbraOcr.onmessage = (e) => { const r = JSON.parse(e.data) as NativeReply; nativePending.get(r.id)?.(r); nativePending.delete(r.id); };
+    return { port: w.UmbraOcr, binary: c.binary };
+  } catch { return null; }
+}
+function nativeCall(msg: string | ArrayBuffer, id: number): Promise<NativeReply> {
+  return new Promise((res) => { nativePending.set(id, res); native!.port.postMessage(msg); });
+}
+function b64(u8: Uint8ClampedArray): string {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+async function nativeReadLines(c: HTMLCanvasElement, limit: number): Promise<PpLine[]> {
+  const t0 = performance.now();
+  const img = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, c.width, c.height);
+  const id = ++seq;
+  let msg: string | ArrayBuffer;
+  if (native!.binary) {
+    const buf = new ArrayBuffer(16 + img.data.length);
+    new Int32Array(buf, 0, 4).set([id, c.width, c.height, limit]);
+    new Uint8Array(buf, 16).set(img.data);
+    msg = buf;
+  } else msg = JSON.stringify({ id, w: c.width, h: c.height, limit, b64: b64(img.data) });
+  const r = await nativeCall(msg, id);
+  if (!r.ok) throw new Error(r.error);
+  const m = r.ms!;
+  ppStats.log.push(`${c.width}x${c.height} (det ${limit}, native ${m.threads} threads): ${Math.round(performance.now() - t0)} ms = det ${m.det} + rec ${m.rec} (${m.lines} lines) + retry ${m.retry}${m.flipped ? ', upside down' : ''}`);
+  return r.lines!;
+}
+
 /** Start loading the engine (models + runtime). Resolves false if it can't run here (then Tesseract is used). */
 export function ppocrReady(): Promise<boolean> {
   if (ready) return ready;
+  native = nativeOff ? null : nativeCaps();
+  if (native) {
+    ready = (async () => {
+      const t0 = performance.now(), id = ++seq;
+      const r = await nativeCall(JSON.stringify({ id, kind: 'warm' }), id);
+      if (r.ok) { ppStats.log.push(`native engine load: ${Math.round(performance.now() - t0)} ms (${r.threads} threads)`); return true; }
+      console.warn('[umbra] native OCR failed to load', r.error);
+      native = null; nativeOff = true; ready = null;
+      return ppocrReady();
+    })();
+    return ready;
+  }
   ready = (async () => {
     const t0 = performance.now();
     const timeout = () => new Promise<PpResponse>((res) => setTimeout(() => res({ id: 0, ok: false, error: 'timeout' }), LOAD_TIMEOUT_MS));
@@ -81,6 +137,7 @@ async function recogniseAll(strips: Float32Array[], widths: number[], flip: bool
 /** Recognise all text lines in a canvas. Lines come back in canvas pixels, corners in reading order. */
 async function readLines(c: HTMLCanvasElement, limit: number): Promise<PpLine[]> {
   if (!(await ppocrReady())) throw new Error('PaddleOCR unavailable');
+  if (native) return nativeReadLines(c, limit);
   const tg = performance.now();
   const img = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, c.width, c.height);
   const t0 = performance.now();

@@ -2,7 +2,7 @@
 // Text pages: pdf.js getTextContent + canvas measureText with the page's loaded font, scaled to item.width.
 // Image-only pages: OCR (tesseract) with glyph boxes.
 import type { TextItem, TextStyle } from 'pdfjs-dist/types/src/display/api';
-import { recognizeWordsRobust, lastOcrStats, type OcrWord } from './ocr';
+import { recognizeWordsRobust, lastOcrStats, getOcrEngine, type OcrWord } from './ocr';
 import { OPS, renderToCanvas, Util, type PDFDocumentProxy, type PDFPageProxy } from './pdf';
 import type { Rect } from './types';
 
@@ -35,7 +35,9 @@ export interface ExtractOptions {
   ocrDpi: number;
   onStatus?: (s: string) => void;
 }
-const DEFAULT_EXTRACT: ExtractOptions = { ocr: 'auto', ocrDpi: 300 };
+const DEFAULT_EXTRACT: ExtractOptions = { ocr: 'auto', ocrDpi: 0 };
+/** Page render resolution for OCR when not set: PaddleOCR reads well at 220 DPI (less to render and move), Tesseract wants 300. */
+const defaultOcrDpi = () => (getOcrEngine() === 'paddle' ? Number((globalThis as { __umbraOcrDpi?: number }).__umbraOcrDpi) || 220 : 300);
 const MIN_TEXT_CHARS = 8;        // fewer non-space chars than this => treat page as scanned
 const OCR_MAX_PIXELS = 16_000_000;
 
@@ -188,6 +190,28 @@ async function ocrLayer(page: PDFPageProxy, index: number, dpi: number, onStatus
   return { page: index, text: b.text, boxes: b.boxes, groups: b.groups, source: 'ocr' };
 }
 
+/**
+ * Words of a page's text (as read for search / Auto Detect), with per-character boxes, in page points.
+ * Lets the copy-ready export reuse what was already read instead of running OCR again.
+ */
+export function pageTextWords(pt: PageText): OcrWord[] {
+  const out: OcrWord[] = [];
+  let line = 0, cur: OcrWord | null = null;
+  const flush = () => { if (cur?.text) out.push(cur); cur = null; };
+  for (let i = 0; i < pt.text.length; i++) {
+    const ch = pt.text[i], r = pt.boxes[i];
+    if (ch === '\n') { flush(); line++; continue; }
+    if (!r || /\s/.test(ch) || (cur && pt.groups[i] !== pt.groups[i - 1])) { flush(); if (!r || /\s/.test(ch)) continue; }
+    const b = { x0: r.x, y0: r.y, x1: r.x + r.w, y1: r.y + r.h };
+    cur ??= { text: '', confidence: 100, line, symbols: [], ...b };
+    cur.text += ch;
+    cur.symbols.push({ text: ch, confidence: 100, ...b });
+    cur.x0 = Math.min(cur.x0, b.x0); cur.y0 = Math.min(cur.y0, b.y0); cur.x1 = Math.max(cur.x1, b.x1); cur.y1 = Math.max(cur.y1, b.y1);
+  }
+  flush();
+  return out;
+}
+
 /** Pictures big enough to hold readable text (e.g. a copy of an ID card pasted into a typed page). */
 const MIN_IMAGE_SIDE = 72;        // points (1 inch)
 const MIN_IMAGE_AREA = 0.03;      // of the page
@@ -254,6 +278,7 @@ async function addImageText(page: PDFPageProxy, t: PageText, dpi: number, onStat
 /** Extract one page's text + geometry, OCR-ing image-only pages when allowed. */
 export async function extractPageText(doc: PDFDocumentProxy, index: number, opts: Partial<ExtractOptions> = {}): Promise<PageText> {
   const o = { ...DEFAULT_EXTRACT, ...opts };
+  if (!o.ocrDpi) o.ocrDpi = defaultOcrDpi();
   const page = await doc.getPage(index + 1);
   if (o.ocr !== 'always') {
     const tt = performance.now();

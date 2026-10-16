@@ -14,6 +14,9 @@ interface AndroidBridge {
   setBarStyle?(dark: boolean): void;
   insets?(): string;
   setSecure?(on: boolean): void;
+  workStart?(title: string): void;
+  workProgress?(text: string, pct: number): void;
+  workDone?(title: string, text: string): void;
 }
 
 /** Kotlin -> JS callbacks (evaluateJavascript). */
@@ -48,6 +51,7 @@ export function createAndroidHost(): Host | null {
   let insetsCb: ((i: Insets) => void) | null = null;
   let themeCb: ((dark: boolean) => void) | null = null;
   let backCb: (() => boolean) | null = null;
+  let lastProgress = 0;
   const parseInsets = (json: string): Insets | null => {
     try { const v = JSON.parse(json) as Insets; return typeof v.top === 'number' ? v : null; } catch { return null; }
   };
@@ -102,6 +106,14 @@ export function createAndroidHost(): Host | null {
     setBarStyle: (dark) => { try { bridge.setBarStyle?.(dark); } catch { /* ignore */ } },
     onBack: (cb) => { backCb = cb; },
     setSecure: (on) => { try { bridge.setSecure?.(on); } catch { /* ignore */ } },
+    workStart: (title) => { lastProgress = 0; try { bridge.workStart?.(title); } catch { /* ignore */ } },
+    workProgress: (text, f) => {
+      const now = Date.now();
+      if (now - lastProgress < 800) return; // the notification needn't update more than about once a second
+      lastProgress = now;
+      try { bridge.workProgress?.(text, Math.round(Math.max(0, Math.min(1, f)) * 100)); } catch { /* ignore */ }
+    },
+    workDone: (title, text) => { try { bridge.workDone?.(title, text); } catch { /* ignore */ } },
     onInsets: (cb) => {
       insetsCb = cb;
       try { const i = bridge.insets ? parseInsets(bridge.insets()) : null; if (i) cb(i); } catch { /* ignore */ }

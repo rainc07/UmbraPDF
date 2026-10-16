@@ -329,7 +329,7 @@ for (const e of scanFx.expected) check(covers(p2.scanHits, e, 1.5), `detect (sca
 check(p2.scanReport.ok && p2.scanReport.ocr?.leaks.length === 0, `detect (scanned): export verified clean: ${p2.scanReport.issues.join('; ') || 'no issues'}`);
 const sLeaked = SCAN_LINES.map((x) => x[1]).filter((v) => p2.scanLayer.replace(/\s/g, '').includes(v.replace(/\s/g, '')));
 check(sLeaked.length === 0 && /Public/.test(p2.scanLayer), `detect (scanned): PII absent from OCR text layer, public text kept (${p2.scanWords} words)`);
-check(/visi/.test(p2.scanLayer) && !/visible/.test(p2.scanLayer), `searchable: visible part of a partly redacted word is kept ("${(p2.scanLayer.match(/stays\s*\S*/) || [''])[0]}")`);
+check(/stays\s*vis/.test(p2.scanLayer) && !/visible/.test(p2.scanLayer), `searchable: visible part of a partly redacted word is kept ("${(p2.scanLayer.match(/stays\s*\S*/) || [''])[0]}")`);
 check(p2.ok600 && /Public/.test(p2.layer600) && !/850505|ahmad@|H87654321/.test(p2.layer600), `600 DPI searchable export: verified, text layer correct (${p2.ms600} ms)`);
 if (failed) console.log('debug hits:', JSON.stringify({ text: p2.textHits.map((h) => [h.label, h.text]), scan: p2.scanHits.map((h) => [h.label, h.text]) }));
 
@@ -450,6 +450,7 @@ check(V.size < V.imgSize / 3, `vector: much smaller than image export (${(V.size
     ['CHONG MEI LING', 'Name'], ['Muhammad Hafiz bin Ismail', 'Name'], ['Ravi Kumar s/o Subramaniam', 'Name'],
     ['7612345678', 'Bank'], ['11223344556', 'Bank'], ['00998877665544', 'Bank'],
     ['Tan Kok Keong', 'Name'], ['Mohd Azman Ismail', 'Name'], ['5141 2345 6789', 'Bank'],
+    ['Tan Chee Kiat', 'Name'], ['Lee Kah Wai', 'Name'],
   ];
   const decoys = ['Account No', 'Account Holder', 'IC Number', 'Raja Muda Abdul Aziz', 'See Below Note', 'Tan Sri Example', 'INV-2024-0001', 'Name Of Applicant', 'Nama Penuh Seperti Dalam Kad'];
   let y = 750;
@@ -457,7 +458,8 @@ check(V.size < V.imgSize / 3, `vector: much smaller than image export (${(V.size
     'Name: tan wei ming', 'NAME     LIM SIEW LING', 'Nama Pemegang Akaun: Nurul Huda binti Hassan', 'Account No.: 8001234567',
     'No. Akaun: 1-2345-6789-0', 'Account No: ACC-00012345678', 'Please contact Tan Kok Keong for details.', 'Signed by Mohd Azman Ismail on behalf of the company.',
     'Office: 8 Jalan Raja Muda Abdul Aziz, Kampung Baru', 'See Below Note', 'Tan Sri Example Foundation', 'Tax invoice no: INV-2024-0001',
-    'Name Of Applicant', 'Nama Penuh Seperti Dalam Kad', 'Account Holder:', 'Account No.', '5141 2345 6789', 'Name', 'IC Number']) { put(t, 72, y); y -= 18; }
+    'Name Of Applicant', 'Nama Penuh Seperti Dalam Kad', 'Account Holder:', 'Account No.', '5141 2345 6789', 'Name', 'IC Number',
+    'Please contact Tan Chee Kiat for details.', 'Lee Kah Wai to sign the form.']) { put(t, 72, y); y -= 18; }
   // A table: header row, then data rows (no labels in the rows).
   y -= 10;
   const cols = [72, 100, 260, 360, 470];

@@ -23,6 +23,13 @@ export interface Host {
   onBack(cb: () => boolean): void;
   /** Hide content from Recent apps / screenshots (Android FLAG_SECURE). */
   setSecure(on: boolean): void;
+  /**
+   * Long work (scan, export): the host keeps it running if the user leaves the app and shows progress,
+   * then says when it's ready. Titles/texts are generic (never document content). Optional.
+   */
+  workStart?(title: string): void;
+  workProgress?(text: string, fraction: number): void;
+  workDone?(title: string, text: string): void;
 }
 
 export interface Insets { top: number; bottom: number; left: number; right: number }

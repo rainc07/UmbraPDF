@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Umbra PDF</string>
+    <string name="ch_work">Working in the background</string>
+    <string name="ch_done">Ready to review or save</string>
 </resources>
