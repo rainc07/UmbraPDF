@@ -75,13 +75,13 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
 
   const exp = expected(v);
   const res = { id: v.id, note: v.note, ms: Math.round(R.ms), stats: R.stats, nric: [0, 0], name: [0, 0], addr: [0, 0], leak: [] };
-  const nricHits = R.hits.filter((h) => h.label.includes('NRIC')).map((h) => dig(h.text));
+  const nricHits = R.hits.filter((h) => h.label.includes('NRIC')).map((h) => (/IC number/i.test(h.text) ? 'UNREAD' : dig(h.text)));
   const used = new Set();
-  for (const e of exp) {
+  for (const e of [...exp].sort((a, b) => (a.side === "back" ? -1 : 0) - (b.side === "back" ? -1 : 0))) { // backs first: a front may also match the placeholder
     if (e.kind === 'nric') {
       res.nric[1]++;
-      // Found = read with ≤10% slips, or the start (≥8 digits) when glare hid the end (the box spans the full width; the leak check confirms).
-      const k = nricHits.findIndex((h, i) => !used.has(i) && (fuzzyIn(dig(e.value), h, 0.1) || (h.length >= 8 && dig(e.value).startsWith(h))));
+      // Found = read with ≤10% slips, the placeholder box for an unreadable front number, or the start (≥8 digits) when glare hid the end (the box spans the full width; the leak check confirms).
+      const k = nricHits.findIndex((h, i) => !used.has(i) && (fuzzyIn(dig(e.value), h, 0.1) || (h.length >= 8 && dig(e.value).startsWith(h)) || (h === 'UNREAD' && e.side === 'front')));
       if (k >= 0) { used.add(k); res.nric[0]++; }
     } else if (e.kind === 'name') {
       res.name[1]++;
@@ -93,10 +93,12 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
     }
   }
   // Leak check: re-OCR the redacted export with the same pipeline; no IC number or name may still be readable.
-  const afterDig = dig(R.after), afterTxt = norm(R.after);
+  const afterLines = R.after.split('\n').map(dig), afterTxt = norm(R.after);
   for (const c of v.cards) {
     const p = PEOPLE[c.who];
-    if (afterDig.includes(dig(p.nric).slice(0, 8)) || afterDig.includes(dig(p.nric).slice(4))) res.leak.push('nric');
+    // Per line: 7 leading or 7 trailing digits of the number still readable (a partial number is still a leak).
+    const n = dig(p.nric);
+    if (afterLines.some((l) => l.includes(n.slice(0, 7)) || l.includes(n.slice(5)))) res.leak.push('nric');
     if (c.side === 'front' && p.name.some((n) => afterTxt.includes(norm(n)))) res.leak.push('name');
   }
   res.hits = R.hits.map((h) => `${h.label}: ${norm(h.text)}`);

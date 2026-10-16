@@ -30,6 +30,7 @@ export const VARIANTS = [
   { id: 'cs-magic', note: 'CamScanner-like: front+back on A4, "Magic Color" filter', page: { a4: 200 }, filter: 'magic', footer: true, quality: 0.7, cards: [{ who: 'c', kind: 'mykad', side: 'front', at: [0.28, 0.12], scale: 1, rot: 0.3 }, { who: 'c', kind: 'mykad', side: 'back', at: [0.28, 0.5], scale: 1, rot: -0.2 }] },
   { id: 'cs-bw', note: 'CamScanner-like: front+back on A4, B&W filter', page: { a4: 200 }, filter: 'bw', footer: true, quality: 0.7, cards: [{ who: 'b', kind: 'mykad', side: 'front', at: [0.28, 0.12], scale: 1, rot: 0 }, { who: 'b', kind: 'mykad', side: 'back', at: [0.28, 0.5], scale: 1, rot: 0.4 }] },
   { id: 'cs-magic-150', note: 'CamScanner-like, 150 DPI, glare on front', page: { a4: 150 }, filter: 'magic', footer: true, quality: 0.6, cards: [{ who: 'a', kind: 'mykad', side: 'front', at: [0.28, 0.12], scale: 1, rot: 0, glare: [0.35, 0.4, 0.25] }, { who: 'a', kind: 'mykad', side: 'back', at: [0.28, 0.5], scale: 1, rot: 0 }] },
+  { id: 'glare-on-ic', note: 'A4 200 DPI, front + back, strong glare wiping the front IC number', page: { a4: 200 }, cards: [{ who: 'd', kind: 'mykad', side: 'front', at: [0.28, 0.12], scale: 1, rot: 0, glare: [0.22, 0.25, 0.22, 1.6] }, { who: 'd', kind: 'mykad', side: 'back', at: [0.28, 0.5], scale: 1, rot: 0 }] },
   { id: 'mypr', note: 'MyPR front, A4 200 DPI', page: { a4: 200 }, cards: [{ who: 'c', kind: 'mypr', side: 'front', at: [0.15, 0.12], scale: 1, rot: -1 }] },
   { id: 'mykid', note: 'MyKid front + back, A4 200 DPI', page: { a4: 200 }, cards: [{ who: 'd', kind: 'mykid', side: 'front', at: [0.2, 0.08], scale: 1, rot: 0.7 }, { who: 'd', kind: 'mykid', side: 'back', at: [0.2, 0.42], scale: 1, rot: 0 }] },
 ];
@@ -168,7 +169,7 @@ export async function drawScene(page, v) {
         if (alpha <= 0) continue;
         const o = (py * W + px) * 4;
         let gl = 0;
-        if (glare) { const r = Math.hypot(u - glare[0], (w - glare[1]) * 0.63) / glare[2]; gl = Math.max(0, 1 - r * r) * 0.85; }
+        if (glare) { const r = Math.hypot(u - glare[0], (w - glare[1]) * 0.63) / glare[2]; gl = Math.min(1, Math.max(0, 1 - r * r) * (glare[3] ?? 0.85)); }
         for (let k = 0; k < 3; k++) {
           let s = (1 - ax) * (1 - ay) * src[i00 + k] + ax * (1 - ay) * src[i10 + k] + (1 - ax) * ay * src[i01 + k] + ax * ay * src[i11 + k];
           s = s + (255 - s) * gl;

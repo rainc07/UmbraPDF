@@ -260,6 +260,11 @@ export const PRESETS: Preset[] = [
       },
     },
     {
+      // ID-card pages: where the OCR saw the card's front but could not read its number (see markUnreadIc).
+      regex: /‹IC number›/g,
+      accept: (_m, t) => CARD_CTX.test(t),
+    },
+    {
       // ID-card pages: the start of an IC number whose end was lost to glare ("780912-14-55"), at the start of a line.
       regex: /(?<=(?:^|\n)[ \t]*)\d{6}(?:[-–]\d{0,2}[-–]?\d{0,3})?(?=[ \t]|\n|$)/g,
       accept: (m, t) => {

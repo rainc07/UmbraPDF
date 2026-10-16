@@ -466,6 +466,7 @@ async function ocrCard(canvas: HTMLCanvasElement, quad: Quad, onStatus: (s: stri
   for (const w of lined) lineLen.set(w.line, (lineLen.get(w.line) ?? 0) + w.text.replace(/[^\p{L}\p{N}]/gu, '').length);
   lined = lined.filter((w) => (lineLen.get(w.line) ?? 0) > 2);
   if (!hasIc(lined)) lined = stretchPartialIc(lined);
+  if (!hasIc(lined) && !lined.some((w) => PARTIAL_IC.test(w.text))) lined = markUnreadIc(lined, b.W, b.H);
   return mapWords(lined, b.q, b.W, b.H);
 }
 
@@ -538,6 +539,27 @@ function stretchPartialIc(words: OcrWord[]): OcrWord[] {
     return { ...w, x1, symbols };
   });
   return out.filter((w) => !drop.has(w));
+}
+
+const PARTIAL_IC = /^\d{6}(?:[-–]\d{0,2}[-–]?\d{0,3})?$/;
+/** Placeholder text for an IC number the OCR could not read; the detector flags it on ID-card pages. */
+export const UNREAD_IC = '‹IC number›';
+
+/**
+ * The front of a MyKad-family card always carries the IC number at the left, between the header and the
+ * chip. If the card's front was recognised (its header read) but the number wasn't (glare, wear, a poor
+ * copy), the place where the number is printed is still personal data: add a placeholder word covering it.
+ */
+function markUnreadIc(words: OcrWord[], W: number, H: number): OcrWord[] {
+  const front = words.some((w) => /^(?:PENGENALAN|MYKAD|MYPR|MYKID|MYKAS)$/i.test(w.text.replace(/[^\p{L}]/gu, '')))
+    && !words.some((w) => /^(?:KETUA|PENGARAH|PENDAFTARAN)$/i.test(w.text.replace(/[^\p{L}]/gu, '')));
+  if (!front) return words;
+  const x0 = 0.03 * W, x1 = 0.56 * W, y0 = 0.17 * H, y1 = 0.33 * H;
+  // Drop anything read inside that zone (fragments of the number), so the placeholder line stands alone.
+  const kept = words.filter((w) => !centreIn(w, { x0, y0, x1, y1 }));
+  const n = UNREAD_IC.length, cw = (x1 - x0) / n;
+  const symbols = [...UNREAD_IC].map((ch, k) => ({ text: ch, confidence: 0, x0: x0 + k * cw, y0, x1: x0 + (k + 1) * cw, y1 }));
+  return relineWords([...kept, { text: UNREAD_IC, confidence: 0, line: 0, symbols, x0, y0, x1, y1 }]);
 }
 
 /** Counters for the technical report / benchmarks. */
