@@ -414,6 +414,10 @@ async function ocrCard(canvas: HTMLCanvasElement, quad: Quad, onStatus: (s: stri
   });
   // Specks read as short low-confidence "words" would split the name from the IC line: drop them.
   let lined = relineWords(words.filter((w) => !(w.confidence < 70 && w.text.replace(/[^\p{L}\p{N}]/gu, '').length <= 3 && !/\d/.test(w.text))));
+  // Lines of one or two stray characters (chip contacts, hologram, specks) only break up the card's fields.
+  const lineLen = new Map<number, number>();
+  for (const w of lined) lineLen.set(w.line, (lineLen.get(w.line) ?? 0) + w.text.replace(/[^\p{L}\p{N}]/gu, '').length);
+  lined = lined.filter((w) => (lineLen.get(w.line) ?? 0) > 2);
   if (!hasIc(lined)) lined = stretchPartialIc(lined);
   return mapWords(lined, b.q, b.W, b.H);
 }
@@ -476,9 +480,9 @@ function stretchPartialIc(words: OcrWord[]): OcrWord[] {
   const drop = new Set<OcrWord>();
   const out = words.map((w0) => {
     // A trailing glyph from the glare ("851231-0°") is dropped from the text.
-    const t = /^(\d{6}[-–]\d{0,2}[-–]?\d{0,3})[^\p{L}\p{N}\s]?$/u.exec(w0.text);
+    const t = /^(\d{6}(?:[-–]\d{0,2}[-–]?\d{0,3})?)[^\p{L}\p{N}\s]{0,2}$/u.exec(w0.text);
     const w = t && t[1] !== w0.text ? { ...w0, text: t[1], symbols: w0.symbols.slice(0, t[1].length) } : w0;
-    const m = /^(\d{6})[-–]\d{0,2}[-–]?\d{0,3}$/.exec(w.text);
+    const m = /^(\d{6})(?:[-–]\d{0,2}[-–]?\d{0,3})?$/.exec(w.text);
     if (!m || w.text.length >= 14 || +m[1].slice(2, 4) < 1 || +m[1].slice(2, 4) > 12 || +m[1].slice(4, 6) < 1 || +m[1].slice(4, 6) > 31) return w;
     const cw = (w.x1 - w.x0) / w.text.length, x1 = w.x1 + (14 - w.text.length) * cw * 1.1;
     for (const o of words) if (o !== w && o.line === w.line && o.x0 >= w.x1 - cw && o.x0 < x1 + cw) drop.add(o);
