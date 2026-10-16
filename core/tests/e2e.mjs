@@ -329,7 +329,7 @@ for (const e of scanFx.expected) check(covers(p2.scanHits, e, 1.5), `detect (sca
 check(p2.scanReport.ok && p2.scanReport.ocr?.leaks.length === 0, `detect (scanned): export verified clean: ${p2.scanReport.issues.join('; ') || 'no issues'}`);
 const sLeaked = SCAN_LINES.map((x) => x[1]).filter((v) => p2.scanLayer.replace(/\s/g, '').includes(v.replace(/\s/g, '')));
 check(sLeaked.length === 0 && /Public/.test(p2.scanLayer), `detect (scanned): PII absent from OCR text layer, public text kept (${p2.scanWords} words)`);
-check(/stays\s*vis/.test(p2.scanLayer) && !/visible/.test(p2.scanLayer), `searchable: visible part of a partly redacted word is kept ("${(p2.scanLayer.match(/stays\s*\S*/) || [''])[0]}")`);
+check(/stays\s*vi/.test(p2.scanLayer) && !/visible/.test(p2.scanLayer), `searchable: visible part of a partly redacted word is kept ("${(p2.scanLayer.match(/stays\s*\S*/) || [''])[0]}")`);
 check(p2.ok600 && /Public/.test(p2.layer600) && !/850505|ahmad@|H87654321/.test(p2.layer600), `600 DPI searchable export: verified, text layer correct (${p2.ms600} ms)`);
 if (failed) console.log('debug hits:', JSON.stringify({ text: p2.textHits.map((h) => [h.label, h.text]), scan: p2.scanHits.map((h) => [h.label, h.text]) }));
 

@@ -24,7 +24,8 @@ android {
         targetSdk = 37
         versionCode = 2
         versionName = "1.1.0"
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        // Native OCR libraries: 64-bit ARM phones only (debug builds add x86_64 for the emulator).
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     signingConfigs {
@@ -47,6 +48,7 @@ android {
     }
 
     buildTypes {
+        debug { ndk { abiFilters += listOf("x86_64") } }
         // Test build: same as release (shrunk, not debuggable) but a separate app that installs next to the real one.
         create("dev") {
             initWith(getByName("release"))
@@ -72,6 +74,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
     // Web core lives in src/main/assets/web (built from /core via `npm run sync:android`).
+    // Compress the native libraries in the APK (smaller download; Android unpacks them at install).
+    packaging { jniLibs { useLegacyPackaging = true } }
     androidResources {
         noCompress += listOf("gz", "wasm", "onnx")
     }
