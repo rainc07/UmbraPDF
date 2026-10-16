@@ -10,6 +10,8 @@ Umbra PDF's own source code is GPL-3.0-or-later. The app bundles MuPDF, which is
 | tesseract.js 6.0.1 | Apache-2.0 |
 | tesseract.js-core 6.0.0 (Tesseract OCR, Leptonica) | Apache-2.0 / BSD-2-Clause |
 | Tesseract `eng.traineddata` (4.0.0_best_int) | Apache-2.0 |
+| onnxruntime-web 1.30.0 (ONNX Runtime) | MIT |
+| PaddleOCR PP-OCRv5 mobile models: `PP-OCRv5_mobile_det`, `en_PP-OCRv5_mobile_rec` + dictionary (ONNX conversions from huggingface.co/ilaylow/PP_OCRv5_mobile_onnx and huggingface.co/monkt/paddleocr-onnx) | Apache-2.0 |
 | AndroidX core, activity, webkit | Apache-2.0 |
 
 Full license texts ship with each package (`core/node_modules/*/LICENSE`, `app/src/main/assets/web/vendor/**/LICENSE*`).

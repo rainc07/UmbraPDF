@@ -11,6 +11,7 @@ import { VARIANTS, PEOPLE, expected, drawScene, makeScenePdf } from './fixtures-
 
 const arg = (k) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : undefined; };
 const only = arg('--only')?.split(',');
+const engine = arg('--engine') ?? 'paddle';
 const dump = arg('--dump'), jsonOut = arg('--json'), assert = process.argv.includes('--assert');
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
@@ -58,9 +59,10 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
   const img = await drawScene(page, v);
   if (dump) await writeFile(`${dump}/${v.id}.jpg`, Buffer.from(img.jpeg));
   const pdf = await makeScenePdf(PDFDocument, img, v);
-  const R = await page.evaluate(async ({ pdf, ALL }) => {
+  const R = await page.evaluate(async ({ pdf, ALL, engine }) => {
     const T = window.__umbraTest;
     await T.load(new Uint8Array(pdf));
+    T.setOcrEngine(engine);
     T.resetOcrStats();
     const t0 = performance.now();
     const hits = (await T.detect(ALL)).map(({ text, label }) => ({ text, label }));
@@ -71,7 +73,7 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
     await T.load(ex.bytes);
     const after = await T.pageText(0);
     return { hits, ms, ocr, after, stats };
-  }, { pdf: Array.from(pdf), ALL });
+  }, { pdf: Array.from(pdf), ALL, engine });
 
   const exp = expected(v);
   const res = { id: v.id, note: v.note, ms: Math.round(R.ms), stats: R.stats, nric: [0, 0], name: [0, 0], addr: [0, 0], leak: [] };
@@ -118,7 +120,7 @@ if (jsonOut) await writeFile(jsonOut, JSON.stringify(rows, null, 1));
 await browser.close(); server.close();
 
 // Floors for --assert (CI): set from the measured results; raise as recall improves.
-const FLOORS = { nric: 0.85, name: 0.7, addr: 0.8 };
+const FLOORS = { nric: 0.95, name: 0.9, addr: 0.85 };
 if (assert) {
   let bad = 0;
   for (const k of ['nric', 'name', 'addr']) { const s = sum(k); if (s[0] / s[1] < FLOORS[k]) { console.log(`FAIL  card recall ${k} ${pct(s)} < ${FLOORS[k] * 100}%`); bad++; } }

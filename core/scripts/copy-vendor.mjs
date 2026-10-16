@@ -32,4 +32,8 @@ mkdirSync(out('tesseract/lang'), { recursive: true });
 writeFileSync(out('tesseract/lang/eng.traineddata'),
   gunzipSync(readFileSync(nm('@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz'))));
 
+// PaddleOCR PP-OCRv5 mobile models (Apache-2.0). The ONNX Runtime Web WASM (MIT) is emitted by Vite with the worker.
+mkdirSync(out('ppocr'), { recursive: true });
+for (const f of ['det.onnx', 'rec_en.onnx', 'dict_en.txt']) cpSync(resolve(root, 'models/ppocrv5', f), out(`ppocr/${f}`));
+
 console.log('vendor assets copied');

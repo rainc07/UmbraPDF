@@ -256,7 +256,9 @@ export async function extractPageText(doc: PDFDocumentProxy, index: number, opts
   const o = { ...DEFAULT_EXTRACT, ...opts };
   const page = await doc.getPage(index + 1);
   if (o.ocr !== 'always') {
+    const tt = performance.now();
     const t = await textLayer(page, index);
+    lastOcrStats.log.push(`text layer: ${Math.round(performance.now() - tt)} ms`);
     if (o.ocr === 'never') return t;
     if (t.text.replace(/\s/g, '').length >= MIN_TEXT_CHARS) return addImageText(page, t, o.ocrDpi, o.onStatus ?? (() => {}));
   }

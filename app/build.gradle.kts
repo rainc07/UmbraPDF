@@ -72,7 +72,7 @@ android {
     }
     // Web core lives in src/main/assets/web (built from /core via `npm run sync:android`).
     androidResources {
-        noCompress += listOf("gz", "wasm")
+        noCompress += listOf("gz", "wasm", "onnx")
     }
 }
 

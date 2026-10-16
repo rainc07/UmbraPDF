@@ -4,7 +4,7 @@ export { openPdf, closePdf, pageSizes, renderToCanvas, PasswordRequiredError } f
 export type { PDFDocumentProxy } from './pdf';
 export { exportRedacted } from './redact';
 export { verifyOutput } from './verify';
-export { ocrRedactedRegions, getOcrWorker, terminateOcr } from './ocr';
+export { ocrRedactedRegions, getOcrWorker, terminateOcr, setOcrEngine, getOcrEngine, warmUpOcr } from './ocr';
 export {
   extractPageText, PageTextCache, findInPage, rectsForRange, literalPattern, searchDocument,
 } from './search';

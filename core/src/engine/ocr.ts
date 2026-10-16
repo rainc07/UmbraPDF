@@ -3,6 +3,14 @@ import { vendorUrl } from './paths';
 import { closePdf, openPdf, renderToCanvas } from './pdf';
 import { findCards, contentGroups, wholeAsCard, warpQuad, mapBoxBack, inQuad, turnQuad, CARD_ASPECT, type Quad } from './cards';
 import type { Progress, RedactionMap, VerifyReport } from './types';
+import { ppocrPage, ppocrReady, ppStats } from './ppocr';
+
+/** Which OCR engine reads pages: PaddleOCR (default) or Tesseract (fallback, and for tests/comparison). */
+let engine: 'paddle' | 'tesseract' = 'paddle';
+export function setOcrEngine(e: 'paddle' | 'tesseract'): void { engine = e; }
+export function getOcrEngine(): 'paddle' | 'tesseract' { return engine; }
+/** Start loading the default engine early (e.g. when a PDF is opened), so the first scan doesn't wait for it. */
+export function warmUpOcr(): void { if (engine === 'paddle') void ppocrReady(); }
 
 let status: (s: string) => void = () => {};
 const LOAD_TIMEOUT_MS = 60_000;
@@ -587,7 +595,7 @@ const quadBox = (q: Quad, W: number, H: number) => {
 
 
 /** Bounding box (with a margin) of the clearly printed parts of a canvas, or null if there is almost none. */
-function inkBox(c: HTMLCanvasElement): { x0: number; y0: number; w: number; h: number } | null {
+export function inkBox(c: HTMLCanvasElement): { x0: number; y0: number; w: number; h: number } | null {
   const S = Math.min(1, 600 / Math.max(c.width, c.height));
   const w = Math.max(1, Math.round(c.width * S)), h = Math.max(1, Math.round(c.height * S));
   const sm = document.createElement('canvas');
@@ -682,6 +690,18 @@ async function readWithCards(canvas: HTMLCanvasElement, quads: { q: Quad; sure: 
  */
 export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: (s: string) => void = () => {}, allowTurn = true): Promise<OcrWord[]> {
   const t = lastOcrStats;
+  const tw = performance.now();
+  if (engine === 'paddle' && await ppocrReady()) {
+    t.log.push(`engine wait: ${Math.round(performance.now() - tw)} ms`);
+    try {
+      onStatus('Reading text…');
+      ppStats.log = t.log;
+      const tp = performance.now();
+      try { return await ppocrPage(canvas, (ws, W, H) => (hasIc(ws) || ws.some((w) => PARTIAL_IC.test(w.text)) ? ws : markUnreadIc(ws, W, H))); } finally { t.log.push(`ppocr page total: ${Math.round(performance.now() - tp)} ms`); }
+    } catch (e) {
+      console.warn('[umbra] PaddleOCR failed on this page, using Tesseract', e);
+    }
+  }
   // Find cards first (cheap, no OCR): by edge/colour, by ink density, and islands of print (whitened cards).
   const tf = performance.now();
   const centre = (q: Quad): [number, number] => [q.reduce((a, p) => a + p[0], 0) / 4, q.reduce((a, p) => a + p[1], 0) / 4];

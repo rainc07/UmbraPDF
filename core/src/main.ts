@@ -6,7 +6,7 @@ import {
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
   type Hit, type SearchPattern, type CustomPattern,
 } from './engine';
-import { lastOcrStats, resetOcrStats } from './engine/ocr';
+import { lastOcrStats, resetOcrStats, setOcrEngine, warmUpOcr } from './engine/ocr';
 import { detectHost, type OpenedFile } from './platform/host';
 
 const host = detectHost();
@@ -142,6 +142,7 @@ async function loadFile(file: OpenedFile) {
   S.sel = null;
   S.sugg = [];
   S.texts = new PageTextCache(doc);
+  warmUpOcr(); // load the OCR engine now, while the user looks at the document
   closePanel();
   S.zoom = fitZoom();
   buildPages();
@@ -745,6 +746,20 @@ function closePanel(animate: boolean | 'replace' = false) {
 }
 function status(msg: string) { const el = document.getElementById('p-status'); if (el) el.textContent = msg; }
 
+/** Settings → "Show technical check report": also show where the last scan's time went (per OCR step). */
+function showTimings() {
+  document.getElementById('p-timing')?.remove();
+  const el = document.getElementById('p-status');
+  if (!el || !prefs.advanced || !lastOcrStats.log.length) return;
+  const d = document.createElement('details');
+  d.id = 'p-timing'; d.className = 'hint';
+  const sm = document.createElement('summary'); sm.textContent = 'OCR timings';
+  const pre = document.createElement('pre'); pre.style.whiteSpace = 'pre-wrap'; pre.style.fontSize = '11px';
+  pre.textContent = `${navigator.hardwareConcurrency || '?'} CPU cores\n` + lastOcrStats.log.join('\n');
+  d.append(sm, pre);
+  el.after(d);
+}
+
 function setSugg(hits: Hit[]) {
   const pages = new Set([...S.sugg, ...hits].map((h) => h.page));
   S.sugg = hits.map((h) => ({ ...h, id: ++suggSeq, on: true }));
@@ -928,16 +943,22 @@ async function runScan(patterns: SearchPattern[], what: string, repeats = false)
   if (!S.texts || S.busy) return;
   S.busy = true; syncToolbar();
   try {
+    resetOcrStats();
+    const t0 = performance.now();
     let all = await searchDocument(S.texts, patterns, (m) => status(m));
+    const t1 = performance.now();
     if (repeats) all = await withRepeats(all);
+    lastOcrStats.log.push(`scan: read+match ${Math.round(t1 - t0)} ms, repeats ${Math.round(performance.now() - t1)} ms`);
     // Don't offer what is already redacted (each rect fully inside an existing box). Partly covered hits are still offered.
     const hits = all.filter((h) => !alreadyRedacted(h));
     const done = all.length - hits.length;
     setSugg(hits);
     const pages = new Set(hits.map((h) => h.page)).size;
     const doneMsg = done ? ` ${done} already redacted.` : '';
-    status(hits.length ? `Found ${hits.length} ${what} on ${pages} page(s).${doneMsg} Untick anything to keep, then tap Redact.`
-      : done ? `Everything found (${done}) is already redacted.` : `No ${what} found.`);
+    const secs = ` (${((performance.now() - t0) / 1000).toFixed(1)} s)`;
+    status(hits.length ? `Found ${hits.length} ${what} on ${pages} page(s)${secs}.${doneMsg} Untick anything to keep, then tap Redact.`
+      : done ? `Everything found (${done}) is already redacted.` : `No ${what} found${secs}.`);
+    showTimings();
   } catch (e) {
     status(`Failed: ${(e as Error).message}`);
     toast((e as Error).message, 5000);
@@ -1302,6 +1323,7 @@ syncToolbar();
   pageText: async (i: number) => (await S.texts!.get(i)).text,
   ocrStats: () => ({ ...lastOcrStats, log: [...lastOcrStats.log] }),
   resetOcrStats: () => resetOcrStats(),
+  setOcrEngine: (e: 'paddle' | 'tesseract') => setOcrEngine(e),
   fitZoom: () => fitZoom(),
   pointAt: (cx: number, cy: number) => pointAt(cx, cy),
   setMode: (m: 'draw' | 'pan') => { S.mode = m; syncToolbar(); },

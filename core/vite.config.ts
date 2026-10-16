@@ -29,4 +29,9 @@ export default defineConfig({
     // Stable file names: the app ships its own copy (WebView cache disabled), and updates overwrite instead of piling up.
     rollupOptions: { output: { entryFileNames: 'assets/[name].js', chunkFileNames: 'assets/[name].js', assetFileNames: 'assets/[name][extname]' } },
   },
+  // The OCR worker (and the ONNX Runtime WASM it loads) also get stable names.
+  worker: {
+    format: 'es',
+    rollupOptions: { output: { entryFileNames: 'assets/[name].js', chunkFileNames: 'assets/[name].js', assetFileNames: 'assets/[name][extname]' } },
+  },
 });
