@@ -92,7 +92,12 @@ class MainActivity : ComponentActivity() {
     @Volatile var nativeOcrBinary = false
         private set
 
-    private fun installOcr() {
+    private fun installOcr() = try { installOcrUnsafe() } catch (e: Throwable) {
+        android.util.Log.e("umbra", "native OCR unavailable", e) // the web core falls back to Tesseract
+        nativeOcr = false
+    }
+
+    private fun installOcrUnsafe() {
         val assets = applicationContext.assets
         ocr = PpOcr { n -> assets.open("web/vendor/ppocr/$n").use { it.readBytes() } }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
@@ -166,8 +171,29 @@ class MainActivity : ComponentActivity() {
     override fun onResume() { super.onResume(); visible = true; WorkService.clearDone(this) }
     override fun onPause() { visible = false; super.onPause() }
 
+    /** Last crash's stack trace (shown once in the app so it can be copied and reported), then cleared. */
+    fun takeLastCrash(): String {
+        val f = java.io.File(filesDir, "last-crash.txt")
+        return if (f.exists()) f.readText().also { f.delete() } else ""
+    }
+
+    private fun recordCrashes() {
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val sw = java.io.StringWriter()
+                e.printStackTrace(java.io.PrintWriter(sw))
+                java.io.File(filesDir, "last-crash.txt").writeText(
+                    "Umbra PDF ${packageManager.getPackageInfo(packageName, 0).versionName} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}\nThread: ${t.name}\n$sw".take(20_000),
+                )
+            } catch (_: Throwable) { }
+            prev?.uncaughtException(t, e)
+        }
+    }
+
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     override fun onCreate(savedInstanceState: Bundle?) {
+        recordCrashes()
         super.onCreate(savedInstanceState)
         // Transparent system bars; the web UI paints behind them and pads itself with the insets.
         enableEdgeToEdge(
@@ -216,8 +242,10 @@ class MainActivity : ComponentActivity() {
             addJavascriptInterface(bridge, "UmbraAndroid")
         }
         // Keep the page's renderer at full priority while the app is in the background (scans keep going).
-        if (Build.VERSION.SDK_INT >= 26) web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-        WorkService.channels(this)
+        try {
+            if (Build.VERSION.SDK_INT >= 26) web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+            WorkService.channels(this)
+        } catch (e: Throwable) { android.util.Log.e("umbra", "background work setup failed", e) }
         installOcr()
         // WebView ignores its own padding, so insets go on a container around it.
         val root = FrameLayout(this).apply { addView(web) }

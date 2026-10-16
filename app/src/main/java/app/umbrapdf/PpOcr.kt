@@ -21,7 +21,8 @@ import kotlin.math.sin
  * `load` returns a model file's bytes by name (det.onnx, rec_en.onnx, dict_en.txt).
  */
 class PpOcr(private val load: (String) -> ByteArray) {
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
+    // Created on first use (on the OCR thread), so a problem loading the native runtime can't stop the app from opening.
+    private val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
     private var det: OrtSession? = null
     private var rec: OrtSession? = null
     private var chars: List<String> = emptyList()

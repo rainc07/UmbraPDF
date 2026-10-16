@@ -88,6 +88,10 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
         org.json.JSONObject(getPrefs().ifEmpty { "{}" }).optJSONObject("opts")?.optBoolean("hideRecents", false) ?: false
     } catch (e: Exception) { false }
 
+    /** Stack trace of the last crash, if any (shown once so the user can copy it into a bug report). */
+    @JavascriptInterface
+    fun lastCrash(): String = try { activity.takeLastCrash() } catch (e: Exception) { "" }
+
     // ---- Native OCR and background work ----
 
     /** {"native":bool,"binary":bool}: whether window.UmbraOcr (native PaddleOCR) is available, and takes ArrayBuffers. */

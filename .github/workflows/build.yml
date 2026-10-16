@@ -51,9 +51,39 @@ jobs:
         run: |
           grep -E '^(FAIL|INFO)|Error|error' test.log | head -40 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
 
+
+  smoke:
+    # Launches the dev build (with x86_64 libraries) on an Android emulator and fails on a crash,
+    # so a build that can't start is never published. Crash stack traces are surfaced as annotations.
+    name: Launch on emulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build dev APK with emulator libraries
+        run: ./gradlew --no-daemon assembleDev -PwithX86
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Launch and watch for crashes
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash .github/scripts/smoke.sh
   apk:
     name: Test APK
-    needs: test
+    needs: [test, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

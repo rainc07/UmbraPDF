@@ -25,7 +25,7 @@ android {
         versionCode = 2
         versionName = "1.1.0"
         // Native OCR libraries: 64-bit ARM phones only (debug builds add x86_64 for the emulator).
-        ndk { abiFilters += listOf("arm64-v8a") }
+        ndk { abiFilters += listOf("arm64-v8a") + (if (project.hasProperty("withX86")) listOf("x86_64") else emptyList()) }
     }
 
     signingConfigs {

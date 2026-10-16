@@ -1319,6 +1319,22 @@ host.onExternalOpen((f) => {
 host.onBack(handleBack);
 syncToolbar();
 
+// The app crashed last time: show what happened once, so it can be copied into a bug report.
+{
+  let crash = '';
+  try { crash = (window as unknown as { UmbraAndroid?: { lastCrash?(): string } }).UmbraAndroid?.lastCrash?.() ?? ''; } catch { /* old shell */ }
+  if (crash) {
+    setTimeout(() => {
+      modal(`<h2>Umbra PDF closed unexpectedly last time</h2>
+        <p class="hint">Nothing about your document is included below. Copy it and send it to the developer to get this fixed.</p>
+        <pre style="white-space:pre-wrap;font-size:11px;max-height:40vh;overflow:auto">${esc(crash)}</pre>
+        <div class="row"><button id="c-copy">Copy</button><button id="c-close" class="primary">OK</button></div>`, true);
+      $('#c-copy').onclick = () => { void navigator.clipboard?.writeText(crash).then(() => toast('Copied'), () => toast('Copy failed')); };
+      $('#c-close').onclick = closeModal;
+    }, 1800);
+  }
+}
+
 // Splash: ~1.5 s from launch, then fade into the app.
 {
   const splash = document.getElementById('splash');
