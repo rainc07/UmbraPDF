@@ -104,6 +104,7 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
   rows.push(res);
   const f = (x) => `${x[0]}/${x[1]}`;
   console.log(`${v.id.padEnd(15)} NRIC ${f(res.nric)}  name ${f(res.name)}  addr ${f(res.addr).padEnd(5)} ${String(res.ms).padStart(6)} ms  ${res.stats.cards}c/${res.stats.passes}p${res.stats.rotated ? '/rot' : ''}  ${res.leak.length ? 'LEAK ' + res.leak.join(',') : ''}`);
+  if (process.env.PROFILE) console.log('   ' + R.stats.log.join('\n   '));
   if (process.env.VERBOSE) console.log('   hits:', res.hits.join(' || '), '\n   ocr:', JSON.stringify(R.ocr).slice(0, 600));
 }
 

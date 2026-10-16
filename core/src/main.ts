@@ -1300,7 +1300,7 @@ syncToolbar();
   zoom: () => S.zoom,
   detectPrefs: () => prefs.detect,
   pageText: async (i: number) => (await S.texts!.get(i)).text,
-  ocrStats: () => ({ ...lastOcrStats }),
+  ocrStats: () => ({ ...lastOcrStats, log: [...lastOcrStats.log] }),
   resetOcrStats: () => resetOcrStats(),
   fitZoom: () => fitZoom(),
   pointAt: (cx: number, cy: number) => pointAt(cx, cy),

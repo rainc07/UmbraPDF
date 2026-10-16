@@ -4,17 +4,20 @@ import { closePdf, openPdf, renderToCanvas } from './pdf';
 import { findCards, contentGroups, wholeAsCard, warpQuad, mapBoxBack, inQuad, turnQuad, CARD_ASPECT, type Quad } from './cards';
 import type { Progress, RedactionMap, VerifyReport } from './types';
 
-let worker: Promise<Worker> | null = null;
 let status: (s: string) => void = () => {};
 const LOAD_TIMEOUT_MS = 60_000;
 
 /**
- * Lazily create a fully-offline tesseract worker (local worker, core and traineddata).
- * Fails (instead of hanging) if the engine is not ready within LOAD_TIMEOUT_MS.
+ * Up to two OCR engines (separate web workers): two cards, or a card and the rest of the page, are read at the
+ * same time on multi-core phones. The second engine starts loading together with the first.
  */
-export function getOcrWorker(onStatus: (s: string) => void = () => {}): Promise<Worker> {
-  status = onStatus;
-  if (worker) return worker;
+const POOL = typeof navigator !== 'undefined' && (navigator.hardwareConcurrency ?? 1) >= 2 ? 2 : 1;
+const workers: (Promise<Worker> | null)[] = [null, null];
+const busy = [false, false];
+let poolSize = POOL;
+const waiters: (() => void)[] = [];
+
+function createOcr(slot: number): Promise<Worker> {
   let timer = 0;
   const created = createWorker('eng', OEM.LSTM_ONLY, {
     workerPath: vendorUrl('tesseract/worker.min.js'),
@@ -23,25 +26,59 @@ export function getOcrWorker(onStatus: (s: string) => void = () => {}): Promise<
     workerBlobURL: false,
     cacheMethod: 'none',
     gzip: false,
-    logger: (m: { status: string; progress: number }) => status(`OCR: ${m.status} ${Math.round(m.progress * 100)}%`),
+    logger: slot ? () => {} : (m: { status: string; progress: number }) => status(`OCR: ${m.status} ${Math.round(m.progress * 100)}%`),
     errorHandler: (e: unknown) => console.error('[umbra] tesseract error', e),
   });
   const timeout = new Promise<never>((_, rej) => {
     timer = window.setTimeout(() => rej(new Error('OCR engine failed to load within 60 s (last step shown above). Export was not saved.')), LOAD_TIMEOUT_MS);
   });
-  worker = Promise.race([created, timeout]).finally(() => clearTimeout(timer));
-  worker.catch(async () => {
-    worker = null;
+  const w = Promise.race([created, timeout]).finally(() => clearTimeout(timer));
+  w.catch(async () => {
+    workers[slot] = null;
+    if (slot) poolSize = 1; // the second engine is optional: carry on with one
     (await created.catch(() => null))?.terminate();
   });
-  return worker;
+  return w;
+}
+
+/**
+ * Lazily create the fully-offline tesseract engine(s) (local worker, core and traineddata).
+ * Fails (instead of hanging) if the engine is not ready within LOAD_TIMEOUT_MS.
+ */
+export function getOcrWorker(onStatus: (s: string) => void = () => {}): Promise<Worker> {
+  status = onStatus;
+  if (!workers[0]) {
+    workers[0] = createOcr(0);
+    if (poolSize > 1 && !workers[1]) workers[1] = createOcr(1);
+  }
+  return workers[0];
+}
+
+/** Run `fn` on a free engine (waiting for one if all are busy). */
+async function withWorker<T>(onStatus: (s: string) => void, fn: (w: Worker) => Promise<T>): Promise<T> {
+  await getOcrWorker(onStatus);
+  for (;;) {
+    let i = -1;
+    for (let k = 0; k < poolSize; k++) if (!busy[k] && workers[k]) { i = k; break; }
+    if (i >= 0) {
+      busy[i] = true;
+      try {
+        let w: Worker;
+        try { w = await workers[i]!; } catch (e) { if (i) continue; throw e; }
+        return await fn(w);
+      } finally {
+        busy[i] = false;
+        waiters.shift()?.();
+      }
+    }
+    await new Promise<void>((r) => waiters.push(r));
+  }
 }
 
 export async function terminateOcr(): Promise<void> {
-  if (!worker) return;
-  const w = await worker.catch(() => null);
-  worker = null;
-  await w?.terminate();
+  const ws = workers.splice(0, 2, null, null);
+  poolSize = POOL;
+  await Promise.all(ws.map(async (p) => (await p?.catch(() => null))?.terminate()));
 }
 
 const OCR_DPI = 150;
@@ -95,12 +132,11 @@ export async function ocrRedactedRegions(
         const share = darkShare(ctx, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 2);
         if (share === null || share >= SOLID) { solidRegions++; continue; } // too thin to hold text, or solid
         onProgress(`OCR check page ${i + 1}`, i / pages);
-        const w = await getOcrWorker((m) => onProgress(m, i / pages));
         const crop = document.createElement('canvas');
         crop.width = Math.max(8, Math.round(r.w * scale));
         crop.height = Math.max(8, Math.round(r.h * scale));
         crop.getContext('2d')!.drawImage(full, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 0, 0, crop.width, crop.height);
-        const { data } = await w.recognize(crop);
+        const { data } = await withWorker((m) => onProgress(m, i / pages), (w) => w.recognize(crop));
         const text = data.text.replace(/\s+/g, ' ').trim();
         if (text.length >= 2 && data.confidence >= MIN_CONF) leaks.push({ page: i + 1, text, confidence: data.confidence });
         crop.width = crop.height = 0;
@@ -130,25 +166,28 @@ export async function recognizeWords(
   canvas: HTMLCanvasElement, onStatus: (s: string) => void = () => {}, minConfidence = 30, psm: PSM = PSM.AUTO,
   whitelist = '',
 ): Promise<OcrWord[]> {
-  const w = await getOcrWorker(onStatus);
-  if (psm !== PSM.AUTO || whitelist) await w.setParameters({ tessedit_pageseg_mode: psm, tessedit_char_whitelist: whitelist });
-  try {
-    const { data } = await w.recognize(canvas, {}, { blocks: true, text: false });
-    const words: OcrWord[] = [];
-    let line = 0;
-    for (const b of data.blocks ?? []) for (const p of b.paragraphs) for (const l of p.lines) {
-      for (const wd of l.words) {
-        const text = wd.text.trim();
-        if (!text || wd.confidence < minConfidence || !/[\p{L}\p{N}]/u.test(text)) continue; // no letters/digits: noise
-        const symbols = (wd.symbols ?? []).map((s) => ({ text: s.text, confidence: s.confidence, ...s.bbox }));
-        words.push({ text, confidence: wd.confidence, line, symbols, ...wd.bbox });
+  return withWorker(onStatus, async (w) => {
+    const t0 = performance.now();
+    if (psm !== PSM.AUTO || whitelist) await w.setParameters({ tessedit_pageseg_mode: psm, tessedit_char_whitelist: whitelist });
+    try {
+      const { data } = await w.recognize(canvas, {}, { blocks: true, text: false });
+      const words: OcrWord[] = [];
+      let line = 0;
+      for (const b of data.blocks ?? []) for (const p of b.paragraphs) for (const l of p.lines) {
+        for (const wd of l.words) {
+          const text = wd.text.trim();
+          if (!text || wd.confidence < minConfidence || !/[\p{L}\p{N}]/u.test(text)) continue; // no letters/digits: noise
+          const symbols = (wd.symbols ?? []).map((s) => ({ text: s.text, confidence: s.confidence, ...s.bbox }));
+          words.push({ text, confidence: wd.confidence, line, symbols, ...wd.bbox });
+        }
+        line++;
       }
-      line++;
+      lastOcrStats.log.push(`${canvas.width}x${canvas.height} psm${psm}${whitelist ? ' digits' : ''}: ${Math.round(performance.now() - t0)} ms, ${words.length} words`);
+      return words;
+    } finally {
+      if (psm !== PSM.AUTO || whitelist) await w.setParameters({ tessedit_pageseg_mode: PSM.AUTO, tessedit_char_whitelist: '' });
     }
-    return words;
-  } finally {
-    if (psm !== PSM.AUTO || whitelist) await w.setParameters({ tessedit_pageseg_mode: PSM.AUTO, tessedit_char_whitelist: '' });
-  }
+  });
 }
 
 /**
@@ -330,7 +369,7 @@ function mapWords(words: OcrWord[], q: Quad, W: number, H: number): OcrWord[] {
 /** Size of the upright copy of a quad: at least 1600 px wide (small cards are upscaled), at most 2400. */
 function uprightSize(q: Quad, aspect: number): [number, number] {
   const long = Math.max(Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]), Math.hypot(q[2][0] - q[3][0], q[2][1] - q[3][1]));
-  const W = Math.round(Math.min(2400, Math.max(1600, long * 1.25)));
+  const W = Math.round(Math.min(1800, Math.max(1600, long * 1.25)));
   return [W, Math.round(W / aspect)];
 }
 
@@ -339,14 +378,16 @@ function uprightSize(q: Quad, aspect: number): [number, number] {
  * (only when needed) a plain pass on the colour copy and a digits-only pass for the IC number.
  * Returns words in source-image pixels, lines in the card's own reading order.
  */
-async function ocrCard(canvas: HTMLCanvasElement, quad: Quad, onStatus: (s: string) => void, t: OcrTimings): Promise<OcrWord[]> {
+async function ocrCard(canvas: HTMLCanvasElement, quad: Quad, onStatus: (s: string) => void, t: OcrTimings): Promise<OcrWord[] | null> {
   const [W0, H0] = uprightSize(quad, CARD_ASPECT);
   let best: { q: Quad; W: number; H: number; crop: HTMLCanvasElement; clean: HTMLCanvasElement; binary: boolean; words: OcrWord[] } | null = null;
   for (const f of [1]) {
     const W = Math.round(W0 * f), H = Math.round(H0 * f);
     for (const k of [0, 2]) {
       const q = turnQuad(quad, k);
-      const crop = warpQuad(canvas, q, W, H), binary = isBinary(crop), clean = binary ? dropThinLines(crop) : preprocessForOcr(crop);
+      const crop = warpQuad(canvas, q, W, H), binary = isBinary(crop);
+      // Whitened by a scanner-app filter: the background clean-up only blurs the print, so read the copy as is.
+      const clean = binary ? dropThinLines(crop) : glareShare(crop) > 0.5 ? cropCanvas(crop, 0, 0, W, H) : preprocessForOcr(crop);
       onStatus(`OCR: ID card${k ? ' (upside down?)' : ''}`);
       t.passes++;
       const words = await recognizeWords(clean, onStatus, 40, PSM.SPARSE_TEXT);
@@ -355,11 +396,17 @@ async function ocrCard(canvas: HTMLCanvasElement, quad: Quad, onStatus: (s: stri
         best = { q, W, H, crop, clean, binary, words };
       } else { crop.width = crop.height = clean.width = clean.height = 0; }
       if (cardWordCount(words) >= 2 && hasIc(words)) break;          // clearly upright and complete
-      if (k === 0 && cardWordCount(words) >= 3) break;               // clearly upright
+      if (k === 0 && cardWordCount(words) >= 2) break;               // clearly upright
     }
   }
   const b = best!;
   let words = b.words;
+  // Nothing card-like in either orientation (a photo, a logo, a very blurry card): no more card passes;
+  // the caller reads the region plainly instead.
+  if (cardWordCount(words) === 0 && !hasIc(relineWords(words))) {
+    b.crop.width = b.crop.height = b.clean.width = b.clean.height = 0;
+    return null;
+  }
   try {
     if (!hasIc(words) || meanConf(words) < 80) {
       t.passes++;
@@ -367,7 +414,7 @@ async function ocrCard(canvas: HTMLCanvasElement, quad: Quad, onStatus: (s: stri
     }
     let hard: HTMLCanvasElement | null = null;
     try {
-      if (!hasIc(relineWords(words)) || isGlare(glareShare(b.crop))) {
+      if (!hasIc(relineWords(words)) || b.binary || isGlare(glareShare(b.crop))) {
         // Faint print (glare, light scans): a harder contrast stretch, then a digits-only read for the number.
         hard = preprocessForOcr(b.crop, 0.55, 0.93);
         t.passes++;
@@ -454,8 +501,8 @@ function dropThinLines(c: HTMLCanvasElement): HTMLCanvasElement {
   return out;
 }
 
-/** Part of the card washed out to white (a highlight or a whitening scanner filter). */
-const isGlare = (share: number) => share > 0.03; // includes whitening filters, where the stronger stretch also helps
+/** Part of the card washed out to white by a highlight. */
+const isGlare = (share: number) => share > 0.03 && share < 0.5; // most of the card white = a whitening filter, not glare
 
 /** Share of the card that is washed-out white (glare or flash): card backgrounds are tinted, glare is not. */
 function glareShare(c: HTMLCanvasElement): number {
@@ -494,9 +541,113 @@ function stretchPartialIc(words: OcrWord[]): OcrWord[] {
 }
 
 /** Counters for the technical report / benchmarks. */
-export interface OcrTimings { passes: number; cards: number; rotated: number }
-export const lastOcrStats: OcrTimings = { passes: 0, cards: 0, rotated: 0 };
-export function resetOcrStats(): void { lastOcrStats.passes = 0; lastOcrStats.cards = 0; lastOcrStats.rotated = 0; }
+export interface OcrTimings { passes: number; cards: number; rotated: number; log: string[] }
+export const lastOcrStats: OcrTimings = { passes: 0, cards: 0, rotated: 0, log: [] };
+export function resetOcrStats(): void { lastOcrStats.passes = 0; lastOcrStats.cards = 0; lastOcrStats.rotated = 0; lastOcrStats.log = []; }
+
+
+/** Copy of a canvas region (x, y, w, h), optionally scaled. */
+function cropCanvas(src: HTMLCanvasElement, x: number, y: number, w: number, h: number, k = 1): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+  c.getContext('2d')!.drawImage(src, x, y, w, h, 0, 0, c.width, c.height);
+  return c;
+}
+const shiftWord = (w: OcrWord, dx: number, dy: number, k = 1): OcrWord => {
+  const f = (b: OcrBox) => ({ x0: b.x0 / k + dx, y0: b.y0 / k + dy, x1: b.x1 / k + dx, y1: b.y1 / k + dy });
+  return { ...w, ...f(w), symbols: w.symbols.map((s) => ({ ...s, ...f(s) })) };
+};
+const quadBox = (q: Quad, W: number, H: number) => {
+  const xs = q.map((p) => p[0]), ys = q.map((p) => p[1]);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs))), y0 = Math.max(0, Math.floor(Math.min(...ys)));
+  return { x0, y0, w: Math.min(W, Math.ceil(Math.max(...xs))) - x0, h: Math.min(H, Math.ceil(Math.max(...ys))) - y0 };
+};
+
+
+/** Bounding box (with a margin) of the clearly printed parts of a canvas, or null if there is almost none. */
+function inkBox(c: HTMLCanvasElement): { x0: number; y0: number; w: number; h: number } | null {
+  const S = Math.min(1, 600 / Math.max(c.width, c.height));
+  const w = Math.max(1, Math.round(c.width * S)), h = Math.max(1, Math.round(c.height * S));
+  const sm = document.createElement('canvas');
+  sm.width = w; sm.height = h;
+  const g = sm.getContext('2d', { willReadFrequently: true })!;
+  g.drawImage(c, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  sm.width = sm.height = 0;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1, n = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    if (Math.min(d[i], d[i + 1], d[i + 2]) < 170) { n++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  if (n < 0.0004 * w * h || x1 < 0) return null;
+  const m = 6;
+  const X0 = Math.max(0, (x0 - m) / S), Y0 = Math.max(0, (y0 - m) / S);
+  return { x0: Math.floor(X0), y0: Math.floor(Y0), w: Math.ceil(Math.min(c.width, (x1 + m + 1) / S) - X0), h: Math.ceil(Math.min(c.height, (y1 + m + 1) / S) - Y0) };
+}
+
+/** Pixel budget for reading the rest of a page around ID cards (about 200 DPI on A4). */
+const AROUND_CARDS_PIXELS = 4_500_000;
+
+/**
+ * A page with (possible) ID cards. Everything runs side by side on the OCR engines:
+ * - each card is read upright (see ocrCard); an island of print that doesn't read like a card is read plainly;
+ * - the rest of the page is read once, with the cards blanked out and at a moderate resolution.
+ */
+async function readWithCards(canvas: HTMLCanvasElement, quads: { q: Quad; sure: boolean }[], onStatus: (s: string) => void, t: OcrTimings): Promise<OcrWord[]> {
+  const W = canvas.width, H = canvas.height;
+  const k = Math.min(1, Math.sqrt(AROUND_CARDS_PIXELS / (W * H)));
+  const rest = document.createElement('canvas');
+  rest.width = Math.round(W * k); rest.height = Math.round(H * k);
+  const rg = rest.getContext('2d')!;
+  rg.drawImage(canvas, 0, 0, rest.width, rest.height);
+  rg.fillStyle = '#fff';
+  for (const { q } of quads) { rg.beginPath(); q.forEach(([x, y], i) => (i ? rg.lineTo(x * k, y * k) : rg.moveTo(x * k, y * k))); rg.closePath(); rg.fill(); }
+  // Only the part of the page that still has print on it is read (often nothing but a scanner-app footer).
+  // A photo of a card (the card fills much of the frame) has only background around it: nothing to read.
+  const cardArea = quads.reduce((a, { q }) => { const r = quadBox(q, W, H); return a + r.w * r.h; }, 0);
+  const ink = cardArea < 0.35 * W * H ? inkBox(rest) : null;
+  let restRead: Promise<OcrWord[]> = Promise.resolve([]);
+  if (ink) {
+    t.passes++;
+    const part = cropCanvas(rest, ink.x0, ink.y0, ink.w, ink.h);
+    restRead = recognizeWords(part, onStatus, 30).then((ws) => ws.map((w) => shiftWord(shiftWord(w, ink.x0, ink.y0), 0, 0, k)))
+      .finally(() => { part.width = part.height = 0; });
+  }
+  rest.width = rest.height = 0;
+  const cardReads = quads.map(async ({ q, sure }) => {
+    if (!sure) {
+      // An island of print (no card edge): read it plainly first, as part of the page. Only if that shows
+      // card wording or an IC number is it read again as a card.
+      const r = quadBox(q, W, H), crop = cropCanvas(canvas, r.x0, r.y0, r.w, r.h);
+      t.passes++;
+      let plain: OcrWord[];
+      try { plain = (await recognizeWords(crop, onStatus, 30)).map((w) => shiftWord(w, r.x0, r.y0)); } finally { crop.width = crop.height = 0; }
+      const lined = relineWords(plain);
+      if (cardWordCount(plain) === 0 && !hasIc(lined)) return { card: false, words: plain };
+      // An upright card from a scanner app that already reads cleanly (number and card wording): done.
+      if (hasIc(lined) && cardWordCount(plain) >= 2 && meanConf(plain) >= 75) { t.cards++; return { card: true, words: lined }; }
+    }
+    const cw = await ocrCard(canvas, q, onStatus, t);
+    if (cw) { t.cards++; return { card: true, words: cw }; }
+    if (!sure) return { card: false, words: [] }; // its plain read above stands
+    // Not readable as a card (or a very blurry one, which reads better unwarped at its own size): read the
+    // region plainly on a cleaned-up copy, as part of the page.
+    const r = quadBox(q, W, H), box = cropCanvas(canvas, r.x0, r.y0, r.w, r.h), clean = preprocessForOcr(box);
+    t.passes++;
+    try {
+      return { card: false, words: (await recognizeWords(clean, onStatus, 45, PSM.SPARSE_TEXT)).map((w) => shiftWord(w, r.x0, r.y0)) };
+    } finally { box.width = box.height = clean.width = clean.height = 0; }
+  });
+  const [restWords, reads] = await Promise.all([restRead, Promise.all(cardReads)]);
+  const out = relineWords([...restWords, ...reads.filter((r) => !r.card).flatMap((r) => r.words)]);
+  let line = out.length ? Math.max(...out.map((w) => w.line)) + 1 : 0;
+  for (const r of reads) {
+    if (!r.card || !r.words.length) continue;
+    for (const w of r.words) out.push({ ...w, line: line + w.line });
+    line += Math.max(...r.words.map((w) => w.line)) + 1;
+  }
+  return out;
+}
 
 /**
  * Robust OCR for a page or picture, in canvas pixels with reading-order line indexes:
@@ -509,50 +660,25 @@ export function resetOcrStats(): void { lastOcrStats.passes = 0; lastOcrStats.ca
  */
 export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: (s: string) => void = () => {}, allowTurn = true): Promise<OcrWord[]> {
   const t = lastOcrStats;
+  // Find cards first (cheap, no OCR): by edge/colour, by ink density, and islands of print (whitened cards).
+  const tf = performance.now();
+  const centre = (q: Quad): [number, number] => [q.reduce((a, p) => a + p[0], 0) / 4, q.reduce((a, p) => a + p[1], 0) / 4];
+  const area = (q: Quad) => { const r = quadBox(q, canvas.width, canvas.height); return r.w * r.h; };
+  const overlaps = (a: Quad, b: Quad) => inQuad(a, ...centre(b)) || inQuad(b, ...centre(a));
+  let shapes = findCards(canvas);
+  let islands = contentGroups(canvas);
+  // Where an edge-found region and an island overlap, keep the larger: a dense block inside a whitened card
+  // (barcode, photo) can look like a small card of its own.
+  shapes = shapes.filter((c) => !islands.some((q) => overlaps(c, q) && area(q) > 1.5 * area(c)));
+  islands = islands.filter((q) => !shapes.some((c) => overlaps(c, q)));
+  const qs = (q: Quad) => { const r = quadBox(q, canvas.width, canvas.height); return `${r.x0},${r.y0} ${r.w}x${r.h}`; };
+  t.log.push(`locate cards: ${Math.round(performance.now() - tf)} ms (edges: ${shapes.map(qs).join('; ') || '-'} | islands: ${islands.map(qs).join('; ') || '-'})`);
+  if (shapes.length || islands.length) return readWithCards(canvas, [...shapes.map((q) => ({ q, sure: true })), ...islands.map((q) => ({ q, sure: false }))], onStatus, t);
   t.passes++;
   const first = await recognizeWords(canvas, onStatus, 30);
-  let cards = findCards(canvas);
-  // Cards whose edge a scanner-app filter erased: islands of print that the first pass shows are card text.
-  const centre = (q: Quad): [number, number] => [q.reduce((a, p) => a + p[0], 0) / 4, q.reduce((a, p) => a + p[1], 0) / 4];
-  for (const q of contentGroups(canvas)) {
-    if (cards.some((c) => inQuad(c, ...centre(q)) || inQuad(q, ...centre(c)))) continue;
-    const inside = first.filter((w) => inQuad(q, (w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2));
-    if (cardWordCount(inside) >= 1 || hasIc(relineWords(inside))) cards.push(q);
-  }
-  if (!cards.length) {
-    const whole = wholeAsCard(canvas);
-    if (whole && (cardWordCount(first) >= 1 || first.length < 60) && Math.max(canvas.width, canvas.height) <= 4000) cards = [whole];
-  }
-  if (cards.length) {
-    t.cards += cards.length;
-    const out = relineWords(first.filter((w) => !cards.some((q) => inQuad(q, (w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2))));
-    let line = out.length ? Math.max(...out.map((w) => w.line)) + 1 : 0;
-    for (const q of cards) {
-      let cw = await ocrCard(canvas, q, onStatus, t);
-      // A very blurry card can read better unwarped at its own size (the plain page passes): when the card
-      // pass lost the number, read the card's box that way too and keep those words as extra lines.
-      if (!hasIc(cw)) {
-        const xs = q.map((p) => p[0]), ys = q.map((p) => p[1]);
-        const x0 = Math.max(0, Math.floor(Math.min(...xs))), y0 = Math.max(0, Math.floor(Math.min(...ys)));
-        const bw = Math.min(canvas.width, Math.ceil(Math.max(...xs))) - x0, bh = Math.min(canvas.height, Math.ceil(Math.max(...ys))) - y0;
-        const box = document.createElement('canvas');
-        box.width = bw; box.height = bh;
-        box.getContext('2d')!.drawImage(canvas, x0, y0, bw, bh, 0, 0, bw, bh);
-        const clean = preprocessForOcr(box);
-        t.passes++;
-        try {
-          const extra = relineWords(await recognizeWords(clean, onStatus, 45, PSM.SPARSE_TEXT));
-          if (hasIc(extra)) {
-            const base = cw.length ? Math.max(...cw.map((w) => w.line)) + 1 : 0;
-            const shift = (b: OcrBox) => ({ x0: b.x0 + x0, y0: b.y0 + y0, x1: b.x1 + x0, y1: b.y1 + y0 });
-            cw = [...cw, ...extra.map((w) => ({ ...w, ...shift(w), symbols: w.symbols.map((s) => ({ ...s, ...shift(s) })), line: base + w.line }))];
-          }
-        } finally { box.width = box.height = clean.width = clean.height = 0; }
-      }
-      for (const w of cw) out.push({ ...w, line: line + w.line });
-      if (cw.length) line += Math.max(...cw.map((w) => w.line)) + 1;
-    }
-    return out;
+  const whole = wholeAsCard(canvas);
+  if (whole && (cardWordCount(first) >= 1 || first.length < 60) && Math.max(canvas.width, canvas.height) <= 4000) {
+    return readWithCards(canvas, [{ q: whole, sure: true }], onStatus, t);
   }
   let words = first;
   if (!(first.length >= 80 && meanConf(first) >= 75)) {   // a clean, dense page: the normal pass is enough

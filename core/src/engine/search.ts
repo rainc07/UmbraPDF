@@ -2,7 +2,7 @@
 // Text pages: pdf.js getTextContent + canvas measureText with the page's loaded font, scaled to item.width.
 // Image-only pages: OCR (tesseract) with glyph boxes.
 import type { TextItem, TextStyle } from 'pdfjs-dist/types/src/display/api';
-import { recognizeWordsRobust, type OcrWord } from './ocr';
+import { recognizeWordsRobust, lastOcrStats, type OcrWord } from './ocr';
 import { OPS, renderToCanvas, Util, type PDFDocumentProxy, type PDFPageProxy } from './pdf';
 import type { Rect } from './types';
 
@@ -178,7 +178,9 @@ async function ocrLayer(page: PDFPageProxy, index: number, dpi: number, onStatus
   const canvas = document.createElement('canvas');
   const b = new Builder();
   try {
+    const tr = performance.now();
     await renderToCanvas(page, canvas, scale);
+    lastOcrStats.log.push(`render ${canvas.width}x${canvas.height}: ${Math.round(performance.now() - tr)} ms`);
     pushWords(b, await recognizeWordsRobust(canvas, onStatus), scale);
   } finally {
     canvas.width = canvas.height = 0;
