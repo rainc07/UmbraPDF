@@ -125,8 +125,11 @@ class MainActivity : ComponentActivity() {
                 val h = ByteBuffer.wrap(bin, 0, 16).order(ByteOrder.LITTLE_ENDIAN)
                 id = h.int
                 val w = h.int; val hh = h.int; val limit = h.int
-                require(bin.size >= 16 + w * hh * 4) { "short image" }
-                ocr.run(id, w, hh, limit, bin, 16)
+                if (w == -1) decodeAndRun(id, limit, bin, 16, bin.size - 16)
+                else {
+                    require(bin.size >= 16 + w * hh * 4) { "short image" }
+                    ocr.run(id, w, hh, limit, bin, 16)
+                }
             } else {
                 val j = JSONObject(str ?: "{}")
                 id = j.optInt("id")
@@ -135,12 +138,30 @@ class MainActivity : ComponentActivity() {
                     JSONObject().put("id", id).put("ok", true).put("load", ms).put("threads", ocr.threads).toString()
                 } else {
                     val px = android.util.Base64.decode(j.getString("b64"), android.util.Base64.DEFAULT)
-                    ocr.run(id, j.getInt("w"), j.getInt("h"), j.getInt("limit"), px, 0)
+                    if (j.getInt("w") == -1) decodeAndRun(id, j.getInt("limit"), px, 0, px.size)
+                    else ocr.run(id, j.getInt("w"), j.getInt("h"), j.getInt("limit"), px, 0)
                 }
             }
         } catch (e: Throwable) {
             JSONObject().put("id", id).put("ok", false).put("error", e.toString()).toString()
         }
+    }
+
+    /** JPEG (or PNG) page image -> RGBA -> OCR. The reply's "ms" gets the decode time. */
+    private fun decodeAndRun(id: Int, limit: Int, data: ByteArray, off: Int, len: Int): String {
+        val t0 = System.nanoTime()
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(data, off, len) ?: error("image decode failed")
+        val w = bmp.width; val h = bmp.height
+        val argb = IntArray(w * h)
+        bmp.getPixels(argb, 0, w, 0, 0, w, h)
+        bmp.recycle()
+        val px = ByteArray(w * h * 4)
+        for (i in argb.indices) {
+            val c = argb[i]; val o = i * 4
+            px[o] = (c shr 16).toByte(); px[o + 1] = (c shr 8).toByte(); px[o + 2] = c.toByte(); px[o + 3] = -1
+        }
+        val decodeMs = (System.nanoTime() - t0) / 1_000_000
+        return ocr.run(id, w, h, limit, px, 0).replaceFirst("\"ms\":{", "\"ms\":{\"decode\":$decodeMs,")
     }
 
     // ---- Background work + notifications ----

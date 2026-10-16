@@ -759,7 +759,10 @@ function showTimings() {
   const sm = document.createElement('summary'); sm.textContent = 'OCR timings';
   const pre = document.createElement('pre'); pre.style.whiteSpace = 'pre-wrap'; pre.style.fontSize = '11px';
   pre.textContent = `${navigator.hardwareConcurrency || '?'} CPU cores\n` + lastOcrStats.log.join('\n');
-  d.append(sm, pre);
+  const copy = document.createElement('button');
+  copy.textContent = 'Copy timings';
+  copy.onclick = () => { void navigator.clipboard?.writeText(pre.textContent ?? '').then(() => toast('Copied'), () => toast('Copy failed')); };
+  d.append(sm, pre, copy);
   el.after(d);
 }
 
@@ -948,16 +951,11 @@ async function withRepeats(found: Hit[]): Promise<Hit[]> {
  */
 async function prefetchText(cache: PageTextCache) {
   await new Promise((r) => setTimeout(r, 300)); // let the first pages paint
-  // Two pages in flight: the next page is rendered and laid out while the current one is being read.
-  let next = 0;
-  const lane = async () => {
-    while (next < cache.doc.numPages) {
-      const i = next++;
-      if (S.texts !== cache) return; // another document was opened
-      try { await cache.get(i); } catch { return; }
-    }
-  };
-  await Promise.all([lane(), lane()]);
+  // One page at a time, in order (two at once competed for memory and the main thread, and was slower).
+  for (let i = 0; i < cache.doc.numPages; i++) {
+    if (S.texts !== cache) return; // another document was opened
+    try { await cache.get(i); } catch { return; }
+  }
 }
 
 /**
