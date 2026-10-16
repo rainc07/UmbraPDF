@@ -101,6 +101,7 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
   }
   res.hits = R.hits.map((h) => `${h.label}: ${norm(h.text)}`);
   res.ocr = R.ocr;
+  res.after = R.after;
   rows.push(res);
   const f = (x) => `${x[0]}/${x[1]}`;
   console.log(`${v.id.padEnd(15)} NRIC ${f(res.nric)}  name ${f(res.name)}  addr ${f(res.addr).padEnd(5)} ${String(res.ms).padStart(6)} ms  ${res.stats.cards}c/${res.stats.passes}p${res.stats.rotated ? '/rot' : ''}  ${res.leak.length ? 'LEAK ' + res.leak.join(',') : ''}`);
@@ -119,7 +120,7 @@ const FLOORS = { nric: 0.85, name: 0.7, addr: 0.8 };
 if (assert) {
   let bad = 0;
   for (const k of ['nric', 'name', 'addr']) { const s = sum(k); if (s[0] / s[1] < FLOORS[k]) { console.log(`FAIL  card recall ${k} ${pct(s)} < ${FLOORS[k] * 100}%`); bad++; } }
-  for (const r of rows) if (r.leak.length) { console.log(`FAIL  ${r.id}: still readable after redaction: ${r.leak.join(',')}`); bad++; }
+  for (const r of rows) if (r.leak.length) { console.log(`FAIL  ${r.id}: still readable after redaction: ${r.leak.join(',')} | hits: ${r.hits.join(' || ')} | after: ${JSON.stringify(r.after).slice(0, 300)} | ocr: ${JSON.stringify(r.ocr).slice(0, 500)} | ${r.stats.log.join('; ')}`); bad++; }
   if (!bad) console.log('PASS  ID-card bench');
   process.exit(bad ? 1 : 0);
 }
