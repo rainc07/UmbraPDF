@@ -163,6 +163,8 @@ const personOk = (m: RegExpExecArray, text: string) => nameOk(m, text) && !NOT_P
 /** ID cards (MyKad and family): card words anywhere on the page. */
 const CARD_CTX = /kad\s*pengenalan|my\s?kad|identity\s*card|warganegara|\bmy(?:pr|kas|kid|tentera)\b/i;
 const CARD_NAME_LINE = `[A-Z][A-Z'’.@/-]*(?:[ ]+[A-Z][A-Z'’.@/-]*){1,6}`;
+/** A wrapped name's second line can be a single word ("NUR AISYAH BINTI" / "ABDULLAH"). */
+const CARD_NAME_LINE2 = `[A-Z][A-Z'’.@/-]{2,}(?:[ ]+[A-Z][A-Z'’.@/-]*){0,5}`;
 
 // ---- Addresses (Malaysia) ----
 const ADDR_KW = ['jalan', 'jln', 'lorong', 'lrg', 'taman', 'tmn', 'persiaran', 'lebuh', 'lebuhraya', 'lingkaran', 'kampung', 'kg', 'batu',
@@ -256,6 +258,15 @@ export const PRESETS: Preset[] = [
         const mm = +d.slice(2, 4), dd = +d.slice(4, 6);
         return mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
       },
+    },
+    {
+      // ID-card pages: the start of an IC number whose end was lost to glare ("780912-14-55"), on its own line.
+      regex: /(?<=(?:^|\n)[ \t]*)\d{6}[-–]\d{0,2}[-–]?\d{0,3}(?=[ \t]*(?:\n|$))/g,
+      accept: (m, t) => {
+        if (m[0].length >= 14 || !CARD_CTX.test(t)) return false;
+        const mm = +m[0].slice(2, 4), dd = +m[0].slice(4, 6);
+        return mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
+      },
     }],
   },
   {
@@ -331,7 +342,7 @@ export const PRESETS: Preset[] = [
         accept: (m, t) => nameOk(m, t) && !/^(?:tan|puan)\s+sri\b/i.test(m[0]) && !/\b(?:tan|puan)\s*$/i.test(t.slice(Math.max(0, m.index - 6), m.index)) },
       { regex: new RegExp(`(?<![\\p{L}])(?:${alt(MY_ANCHORS, true)}|${alt(MY_ANCHORS, false)})(?:[ ]+${NAME_WORD}){1,4}(?![\\p{L}])`, 'gu'), accept: personOk },
       // ID card: the name lines right under the IC number.
-      { regex: new RegExp(`(?<=(?:^|\\n)[^\\n]*\\d{6}-?\\d{2}-?\\d{4}[^\\n]*\\n(?:[^\\n]{0,3}\\n)?)${CARD_NAME_LINE}(?:\\n${CARD_NAME_LINE})?`, 'gu'),
+      { regex: new RegExp(`(?<=(?:^|\\n)[^\\n]*\\d{6}-?\\d{2}-?\\d{4}[^\\n]*\\n(?:[^\\n]{0,3}\\n)?)${CARD_NAME_LINE}(?:\\n${CARD_NAME_LINE2}(?=[ \\t]*(?:\\n|$)))?`, 'gu'),
         accept: (m, t) => CARD_CTX.test(t) && nameWordsOk(m[0]) && !NOT_PERSON_WORD.test(m[0]),
         refine: (m) => {
           // A second line belongs to the name only if it doesn't look like the address starting.

@@ -153,7 +153,10 @@ function pushWords(b: Builder, words: OcrWord[], scale: number, off = { x: 0, y:
     line = w.line;
     const g = groupBase + w.line;
     const glyphs = w.symbols.map((s) => s.text).join('');
-    if (glyphs === w.text) {
+    if (w.mapped) {
+      // Read from a turned/warped copy: one full box per character, already in image pixels.
+      w.symbols.forEach((s, k) => b.push(w.text[k], toPt(s.x0, s.y0, s.x1, s.y1), g));
+    } else if (glyphs === w.text) {
       for (const s of w.symbols) for (const ch of s.text) b.push(ch, toPt(s.x0, w.y0, s.x1, w.y1), g);
     } else {
       const n = w.text.length, cw = (w.x1 - w.x0) / n;

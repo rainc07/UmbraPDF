@@ -6,6 +6,7 @@ import {
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
   type Hit, type SearchPattern, type CustomPattern,
 } from './engine';
+import { lastOcrStats, resetOcrStats } from './engine/ocr';
 import { detectHost, type OpenedFile } from './platform/host';
 
 const host = detectHost();
@@ -1299,6 +1300,8 @@ syncToolbar();
   zoom: () => S.zoom,
   detectPrefs: () => prefs.detect,
   pageText: async (i: number) => (await S.texts!.get(i)).text,
+  ocrStats: () => ({ ...lastOcrStats }),
+  resetOcrStats: () => resetOcrStats(),
   fitZoom: () => fitZoom(),
   pointAt: (cx: number, cy: number) => pointAt(cx, cy),
   setMode: (m: 'draw' | 'pan') => { S.mode = m; syncToolbar(); },
