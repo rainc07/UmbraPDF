@@ -56,17 +56,15 @@ android {
             versionNameSuffix = "-dev"
             signingConfig = signingConfigs.getByName("dev")
             matchingFallbacks += listOf("release")
-            optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
-            }
+            // Whole-app R8 (keep rules in src/main/keepRules). Optimising only some packages (packageScope,
+            // experimental) left app classes pointing at changed Kotlin internals: IllegalAccessError at launch.
+            optimization { enable = true }
         }
         release {
             if (hasReleaseKey) signingConfig = signingConfigs.getByName("release")
-            optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
-            }
+            // Whole-app R8 (keep rules in src/main/keepRules). Optimising only some packages (packageScope,
+            // experimental) left app classes pointing at changed Kotlin internals: IllegalAccessError at launch.
+            optimization { enable = true }
         }
     }
     compileOptions {

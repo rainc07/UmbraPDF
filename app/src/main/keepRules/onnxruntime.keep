@@ -1,3 +1,6 @@
 # ONNX Runtime's native code looks up its Java classes, fields and methods by name: keep them as they are.
 -keep class ai.onnxruntime.** { *; }
 -keepclasseswithmembernames class * { native <methods>; }
+
+# JS bridge methods are called by name from the web page.
+-keepclassmembers class app.umbrapdf.UmbraBridge { @android.webkit.JavascriptInterface <methods>; }
