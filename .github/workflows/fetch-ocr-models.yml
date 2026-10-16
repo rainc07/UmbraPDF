@@ -1,0 +1,43 @@
+# Fetches the PaddleOCR PP-OCRv5 mobile ONNX models (Apache-2.0) into core/models/ppocrv5/ and commits them.
+# Checksums are pinned: a changed upstream file fails the job instead of slipping in.
+# Runs when this file changes, or by hand (Actions → Fetch OCR models).
+name: Fetch OCR models
+
+on:
+  push:
+    paths: ['.github/workflows/fetch-ocr-models.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify
+        run: |
+          set -euo pipefail
+          d=core/models/ppocrv5
+          mkdir -p "$d"
+          get() { curl -fsSL --retry 3 -o "$d/$1" "$2"; echo "$3  $d/$1" | sha256sum -c -; }
+          # Text detection: PP-OCRv5_mobile_det (converted with paddle2onnx), Apache-2.0
+          get det.onnx https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_det.onnx \
+            1eb7b4f7ab657ebd1c66d5f79bca7497f29768a2e3c15e52daecbba1a8e4a039
+          # Text recognition: en_PP-OCRv5_mobile_rec + its dictionary, Apache-2.0
+          get rec_en.onnx https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/rec.onnx \
+            4e16deb22c4da6468bdca539b2cd3c8687825538b67109177c47d359ab994cd7
+          curl -fsSL --retry 3 -o "$d/dict_en.txt" https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/dict.txt
+          curl -fsSL --retry 3 -o "$d/rec_en.config.json" https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/config.json
+          sha256sum "$d"/*
+          ls -la "$d"
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add core/models/ppocrv5
+          git diff --cached --quiet && { echo "models unchanged"; exit 0; }
+          git commit -m "Add PaddleOCR PP-OCRv5 mobile ONNX models (Apache-2.0)"
+          git push
