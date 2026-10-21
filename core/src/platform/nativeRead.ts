@@ -13,7 +13,7 @@ const CARD_HEADER = /^(?:KAD|PENGENALAN|WARGANEGARA|PENDUDUK|KETUA|PENGARAH|PEND
 
 type Waiter = { res: (s: string) => void; rej: (e: Error) => void };
 type Reply = { ok: boolean; error?: string; blocks?: PpLine[][];
-  ms?: { render: number; total: number; islands: number; det: number; rec: number; retry: number; threads: number } };
+  ms?: { render: number; wait: number; total: number; islands: number; det: number; rec: number; retry: number; threads: number } };
 
 export class NativeReader {
   private pages = new Map<number, ScanPage & { scale: number }>();
@@ -37,14 +37,14 @@ export class NativeReader {
       const chars = tc.items.map((it) => ('str' in it ? it.str : '')).join('').replace(/\s/g, '').length;
       if (chars >= MIN_TEXT_CHARS) continue;
       const scale = ocrScale(page, dpi), vp = page.getViewport({ scale }), base = page.getViewport({ scale: 1 });
-      r.pages.set(i, { i, w: Math.max(1, Math.ceil(vp.width)), h: Math.max(1, Math.ceil(vp.height)), pw: base.width, ph: base.height, scale });
+      r.pages.set(i, { i, w: Math.max(1, Math.ceil(vp.width)), h: Math.max(1, Math.ceil(vp.height)), pw: base.width, ph: base.height, n: doc.numPages, scale });
     }
     return r.pages.size && r.resume() ? r : null;
   }
 
   /** (Re)start reading the pages not read yet (after a stopped scan). */
   resume(): boolean {
-    return (this.active = this.scan.start([...this.pages.values()].map(({ i, w, h, pw, ph }) => ({ i, w, h, pw, ph }))));
+    return (this.active = this.scan.start([...this.pages.values()].map(({ scale: _, ...p }) => p)));
   }
 
   /** Stop reading. Pages already read stay available; anyone waiting for another page gets an AbortError. */
@@ -71,7 +71,7 @@ export class NativeReader {
     const r = JSON.parse(s) as Reply;
     if (!r.ok) { lastOcrStats.log.push(`page ${i + 1}: native read failed (${r.error}), reading here`); return null; }
     const m = r.ms!;
-    lastOcrStats.log.push(`page ${i + 1} ${p.w}x${p.h} (native ${m.threads} threads): ${m.total} ms = render ${m.render} + ${m.islands} block(s): det ${m.det} + rec ${m.rec} + retry ${m.retry}`);
+    lastOcrStats.log.push(`page ${i + 1} ${p.w}x${p.h} (native ${m.threads} threads): ${m.total} ms = render ${m.render} (ahead; waited ${m.wait}) + ${m.islands} block(s): det ${m.det} + rec ${m.rec} + retry ${m.retry}`);
     const words = wordsFromBlocks(r.blocks!);
     const cards = words.some((w) => CARD_HEADER.test(w.text.replace(/[^\p{L}]/gu, '')));
     if (cards) lastOcrStats.log.push(`page ${i + 1}: ID card wording, finding the cards on it`);

@@ -228,6 +228,22 @@ await page.setViewportSize({ width: 412, height: 860 }); await page.waitForTimeo
   check(!after.scanning && /^Stopped/.test(after.status) && !after.stop, `scan: Stop ends it (${after.status})`);
 }
 
+// Closing the panel during a scan: Auto Detect stays usable, reopening shows progress and Stop, results come back.
+{
+  await T('startDetect', ['name', 'address']);
+  await page.waitForTimeout(300);
+  await page.click('#p-close'); await page.waitForTimeout(350);
+  const closed = await page.evaluate(() => ({ detect: document.querySelector('#btn-detect').disabled, find: document.querySelector('#btn-find').disabled, panel: window.__umbraTest.state().panel }));
+  await page.click('#btn-detect'); await page.waitForTimeout(200);
+  const reopened = await page.evaluate(() => ({ stop: !!document.querySelector('#p-stop'), status: document.querySelector('#p-status')?.textContent ?? '' }));
+  await page.click('#p-close'); await page.waitForTimeout(100);
+  await page.evaluate(() => window.__scan);
+  const end = await page.evaluate(() => ({ panel: window.__umbraTest.state().panel, items: document.querySelectorAll('#p-results li').length, stop: !!document.querySelector('#p-stop') }));
+  check(!closed.detect && closed.find && closed.panel === null, `scan: with the panel closed, Auto Detect stays usable (Find waits) (${JSON.stringify(closed)})`);
+  check(reopened.stop && /page/i.test(reopened.status), `scan: reopening shows progress and Stop ("${reopened.status}")`);
+  check(end.panel === 'detect' && end.items > 0 && !end.stop, `scan: results open in the panel when it finishes (${JSON.stringify(end)})`);
+}
+
 // Back closes the export result ("Safe to share").
 {
   await T('showResult');

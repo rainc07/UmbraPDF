@@ -10,7 +10,12 @@ import org.json.JSONObject
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -25,6 +30,7 @@ import kotlin.math.roundToInt
  * PpOcr. Results stay here, in page pixels, until the web core takes them (it then finds ID cards and builds
  * the page text itself). Pages are queued one at a time on the OCR thread (the next after the last one ends),
  * so the page's own OCR requests (ID cards) wait for one page at most, not for the rest of the document.
+ * The next page is rendered on its own thread while the current one is read.
  */
 class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, private val events: Events) {
     interface Events {
@@ -47,6 +53,7 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
     }
 
     private val results = ConcurrentHashMap<Int, String>()
+    private val renderExec = Executors.newSingleThreadExecutor() // PdfRenderer is only used on this thread
     @Volatile private var gen = 0
     @Volatile private var current: Job? = null
     @Volatile var running = false
@@ -62,20 +69,54 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
         val job = Job(++gen, file, todo)
         current = job
         running = true
-        step(job, 0)
+        step(job, 0, null)
         return true
     }
 
-    private fun step(job: Job, k: Int) {
+    private fun close(job: Job) = try { renderExec.execute { job.close() } } catch (_: RejectedExecutionException) { job.close() }
+
+    private fun step(job: Job, k: Int, rendered: Future<Rendered>?) {
         try {
             exec.execute {
                 when {
-                    job.id != gen -> job.close()
-                    k == job.pages.size -> { job.close(); running = false; events.onFinished(false) }
-                    else -> { readPage(job, job.pages[k]); step(job, k + 1) }
+                    job.id != gen -> close(job)
+                    k == job.pages.size -> { close(job); running = false; events.onFinished(false) }
+                    else -> {
+                        val cur = rendered ?: renderExec.submit(Callable { render(job, job.pages[k]) })
+                        val next = if (k + 1 < job.pages.size) renderExec.submit(Callable { render(job, job.pages[k + 1]) }) else null
+                        readPage(job, job.pages[k], cur)
+                        step(job, k + 1, next)
+                    }
                 }
             }
-        } catch (_: java.util.concurrent.RejectedExecutionException) { job.close() } // app closing
+        } catch (_: RejectedExecutionException) { close(job) } // app closing
+    }
+
+    private class Rendered(val px: ByteArray, val islands: List<Box>, val ms: Long)
+
+    /** Render a page at the requested size and find its blocks of print (render thread). */
+    private fun render(job: Job, p: Page): Rendered {
+        val t0 = System.nanoTime()
+        if (job.id != gen) error("stopped")
+        val r = job.renderer ?: run {
+            val fd = ParcelFileDescriptor.open(job.file, ParcelFileDescriptor.MODE_READ_ONLY)
+            job.pfd = fd
+            PdfRenderer(fd).also { job.renderer = it }
+        }
+        val pg = r.openPage(p.index)
+        val bm: Bitmap
+        try {
+            // pdf.js and PdfRenderer must agree on the page box (crop box, /Rotate), or the boxes would be misplaced.
+            if (abs(pg.width - p.pw) > 2f || abs(pg.height - p.ph) > 2f) error("page size ${pg.width}x${pg.height} != ${p.pw}x${p.ph}")
+            bm = Bitmap.createBitmap(p.w, p.h, Bitmap.Config.ARGB_8888)
+            bm.eraseColor(Color.WHITE)
+            pg.render(bm, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        } finally { pg.close() }
+        val px = ByteArray(p.w * p.h * 4)
+        bm.copyPixelsToBuffer(ByteBuffer.wrap(px)) // ARGB_8888 is stored as R, G, B, A bytes
+        val islands = inkIslands(bm)
+        bm.recycle()
+        return Rendered(px, islands, (System.nanoTime() - t0) / 1_000_000)
     }
 
     /** Stop after the page being read. Pages already read stay available. */
@@ -87,31 +128,17 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
     /** Forget everything (another document was opened, or it was closed). */
     fun reset() { cancel(notify = false); results.clear() }
 
+    fun shutdown() = renderExec.shutdownNow()
+
     /** A page's result JSON, or "" if it hasn't been read (yet). */
     fun take(index: Int): String = results[index] ?: ""
 
-    private fun readPage(job: Job, p: Page) {
+    private fun readPage(job: Job, p: Page, rendered: Future<Rendered>) {
         val t0 = System.nanoTime()
         val out = try {
-            val r = job.renderer ?: run {
-                val fd = ParcelFileDescriptor.open(job.file, ParcelFileDescriptor.MODE_READ_ONLY)
-                job.pfd = fd
-                PdfRenderer(fd).also { job.renderer = it }
-            }
-            val pg = r.openPage(p.index)
-            val bm: Bitmap
-            try {
-                // pdf.js and PdfRenderer must agree on the page box (crop box, /Rotate), or the boxes would be misplaced.
-                if (abs(pg.width - p.pw) > 2f || abs(pg.height - p.ph) > 2f) error("page size ${pg.width}x${pg.height} != ${p.pw}x${p.ph}")
-                bm = Bitmap.createBitmap(p.w, p.h, Bitmap.Config.ARGB_8888)
-                bm.eraseColor(Color.WHITE)
-                pg.render(bm, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-            } finally { pg.close() }
+            val rd = try { rendered.get() } catch (e: ExecutionException) { throw e.cause ?: e }
             val t1 = System.nanoTime()
-            val px = ByteArray(p.w * p.h * 4)
-            bm.copyPixelsToBuffer(ByteBuffer.wrap(px)) // ARGB_8888 is stored as R, G, B, A bytes
-            val islands = inkIslands(bm)
-            bm.recycle()
+            val px = rd.px; val islands = rd.islands
             val blocks = JSONArray()
             var det = 0L; var rec = 0L; var retry = 0L
             for (b in islands) {
@@ -134,7 +161,7 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
             if (job.id != gen) return
             val ms = { a: Long, z: Long -> (z - a) / 1_000_000 }
             JSONObject().put("ok", true).put("blocks", blocks).put("ms", JSONObject()
-                .put("render", ms(t0, t1)).put("total", ms(t0, System.nanoTime())).put("islands", islands.size)
+                .put("render", rd.ms).put("wait", ms(t0, t1)).put("total", ms(t0, System.nanoTime())).put("islands", islands.size)
                 .put("det", det).put("rec", rec).put("retry", retry).put("threads", ocr.threads)).toString()
         } catch (e: Throwable) {
             if (job.id != gen) return

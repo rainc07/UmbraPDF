@@ -2,7 +2,7 @@
 export interface OpenedFile { name: string; bytes: Uint8Array }
 
 /** A page for the host to read natively: bitmap size (px) and page size in points (geometry check). */
-export interface ScanPage { i: number; w: number; h: number; pw: number; ph: number }
+export interface ScanPage { i: number; w: number; h: number; pw: number; ph: number; n: number /* pages in the document */ }
 
 /**
  * Native reading of scanned pages (Android), which keeps going while the app is in the background.

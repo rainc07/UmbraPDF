@@ -34,6 +34,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Thin shell: one WebView hosting the bundled web core. No network, no file:// access.
@@ -149,12 +150,15 @@ class MainActivity : ComponentActivity() {
     // ---- Native scan of scanned pages (keeps going in the background; see NativeScan) ----
     private var scan: NativeScan? = null
     private var scanning = false
+    private var scanPages = 0 // pages in the document (the notification counts like the page: "Reading page 5 of 23")
 
     private val scanEvents = object : NativeScan.Events {
         override fun onPage(index: Int, done: Int, total: Int) = runOnUiThread {
             bridge.callJs("onScanPage", index.toString())
+            // Page index+1 is read; the next one is being read now (what the app shows too).
+            val n = max(scanPages, index + 1)
             if (scanning) WorkService.progress(this@MainActivity, if (jsWork) workTitle else getString(R.string.scan_title),
-                getString(R.string.scan_progress, done, total), done * 100 / max(1, total))
+                getString(R.string.scan_progress, min(index + 2, n), n), done * 100 / max(1, total))
         }
         override fun onFinished(cancelled: Boolean) = runOnUiThread {
             if (!scanning) return@runOnUiThread
@@ -182,6 +186,7 @@ class MainActivity : ComponentActivity() {
             val o = a.getJSONObject(k)
             NativeScan.Page(o.getInt("i"), o.getInt("w"), o.getInt("h"), o.getDouble("pw").toFloat(), o.getDouble("ph").toFloat())
         }
+        if (a.length() > 0) scanPages = a.getJSONObject(0).optInt("n", 0)
         s.start(f, pages)
         if (s.running) runOnUiThread {
             // Our own flags, not WorkService.running: a stop just requested may not have reached the service yet.
@@ -362,6 +367,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         scan?.reset()
+        scan?.shutdown()
         WorkService.stop(this)
         ocrExec.shutdownNow()
         bridge.shutdown()

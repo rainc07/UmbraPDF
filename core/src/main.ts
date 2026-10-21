@@ -38,6 +38,8 @@ const S = {
   texts: null as PageTextCache | null,
   native: null as NativeReader | null, // scanned pages read by the host (keeps going in the background)
   scan: null as AbortController | null, // running Find / Auto Detect scan (Stop)
+  scanPanel: null as 'find' | 'detect' | null, // the panel that scan belongs to (it can be closed and opened again meanwhile)
+  scanMsg: '',
   prefetch: null as AbortController | null,
   dirty: false, // unsaved redaction changes
   findTerms: [] as { q: string; matchCase: boolean; wholeWord: boolean }[],
@@ -89,7 +91,10 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 
 function syncToolbar() {
   const has = !!S.doc;
-  for (const id of ['#zoom-in', '#zoom-out', '#btn-export', '#btn-find', '#btn-detect']) $<HTMLButtonElement>(id).disabled = !has || S.busy;
+  for (const id of ['#zoom-in', '#zoom-out', '#btn-export']) $<HTMLButtonElement>(id).disabled = !has || S.busy;
+  // A running scan's own panel can be closed and opened again (to see progress or Stop).
+  $<HTMLButtonElement>('#btn-find').disabled = !has || (S.busy && S.scanPanel !== 'find');
+  $<HTMLButtonElement>('#btn-detect').disabled = !has || (S.busy && S.scanPanel !== 'detect');
   $('#btn-find').classList.toggle('on', S.panel === 'find');
   $('#btn-detect').classList.toggle('on', S.panel === 'detect');
   document.querySelectorAll<HTMLButtonElement>('#panel [data-busy]').forEach((b) => { b.disabled = S.busy; });
@@ -147,6 +152,7 @@ async function loadFile(file: OpenedFile) {
   S.sel = null;
   S.sugg = [];
   stopBackground();
+  resetOcrStats(); // timings are kept per document: pages are read in the background before any scan
   // Scanned pages are read natively where the host can (Android): that keeps going in the background.
   const reader = NativeReader.start(doc, host.nativeScan?.()).catch(() => null);
   void reader.then((r) => { if (S.doc === doc) S.native = r; else r?.cancel(); });
@@ -758,7 +764,20 @@ function closePanel(animate: boolean | 'replace' = false) {
   setSugg([]);
   syncToolbar();
 }
-function status(msg: string) { const el = document.getElementById('p-status'); if (el) el.textContent = msg; }
+function status(msg: string) {
+  if (S.scan) S.scanMsg = msg;
+  const el = document.getElementById('p-status'); if (el) el.textContent = msg;
+}
+
+/** The running scan's panel (opened again): its progress and the Stop button. */
+function scanUi() {
+  if (!S.scan || S.panel !== S.scanPanel || document.getElementById('p-stop')) return;
+  status(S.scanMsg);
+  const stop = document.createElement('button');
+  stop.id = 'p-stop'; stop.className = 'danger'; stop.textContent = 'Stop';
+  stop.onclick = askStopScan;
+  document.getElementById('p-status')?.after(stop);
+}
 
 /** Settings → "Show technical check report": also show where the last scan's time went (per OCR step). */
 function showTimings() {
@@ -1009,13 +1028,11 @@ async function runScan(patterns: SearchPattern[], what: string, repeats = false)
   if (!S.texts || S.busy) return;
   S.busy = true; syncToolbar();
   const ac = new AbortController();
-  S.scan = ac;
-  const stop = document.createElement('button');
-  stop.id = 'p-stop'; stop.className = 'danger'; stop.textContent = 'Stop';
-  stop.onclick = askStopScan;
-  document.getElementById('p-status')?.after(stop);
+  S.scan = ac; S.scanPanel = S.panel; S.scanMsg = '';
+  const own = S.panel;
+  scanUi();
   try {
-    resetOcrStats();
+    lastOcrStats.log.push('--- scan started');
     S.native?.resume(); // after a stopped scan: read the rest natively again
     work = startWork(`Scanning ${what}`);
     const t0 = performance.now();
@@ -1026,6 +1043,7 @@ async function runScan(patterns: SearchPattern[], what: string, repeats = false)
     // Don't offer what is already redacted (each rect fully inside an existing box). Partly covered hits are still offered.
     const hits = all.filter((h) => !alreadyRedacted(h));
     const done = all.length - hits.length;
+    if (S.panel !== own) { if (own === 'find') openFind(); else openDetect(); } // closed meanwhile: open it for the results
     setSugg(hits);
     const pages = new Set(hits.map((h) => h.page)).size;
     const doneMsg = done ? ` ${done} already redacted.` : '';
@@ -1045,8 +1063,8 @@ async function runScan(patterns: SearchPattern[], what: string, repeats = false)
     status(`Failed: ${(e as Error).message}`);
     toast((e as Error).message, 5000);
   } finally {
-    S.scan = null;
-    stop.remove();
+    S.scan = null; S.scanPanel = null;
+    document.getElementById('p-stop')?.remove();
     if (document.getElementById('st-yes')) closeModal(); // "Stop?" was still open: nothing left to stop
     S.busy = false; syncToolbar();
   }
@@ -1122,7 +1140,8 @@ function openFind() {
   renderTerms();
   bindResults();
   syncToolbar();
-  $<HTMLInputElement>('#f-q').focus();
+  scanUi();
+  if (!S.scan) $<HTMLInputElement>('#f-q').focus();
 }
 
 function openDetect() {
@@ -1185,6 +1204,7 @@ function openDetect() {
   };
   bindResults();
   syncToolbar();
+  scanUi();
 }
 
 // ---------- Export ----------
