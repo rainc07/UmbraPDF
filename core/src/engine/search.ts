@@ -293,7 +293,9 @@ export async function extractPageText(doc: PDFDocumentProxy, index: number, opts
   if (o.ocr !== 'always') {
     const tt = performance.now();
     const t = await textLayer(page, index);
-    lastOcrStats.log.push(`text layer: ${Math.round(performance.now() - tt)} ms`);
+    const tms = Math.round(performance.now() - tt);
+    // A long wait here is Android pausing the page while the app was hidden (native reading carries on).
+    lastOcrStats.log.push(`text layer: ${tms} ms${tms > 5000 ? ' (likely the page paused while the app was in the background)' : ''}`);
     if (o.ocr === 'never') return t;
     if (t.text.replace(/\s/g, '').length >= MIN_TEXT_CHARS) return addImageText(page, t, o.ocrDpi, o.onStatus ?? (() => {}));
   }

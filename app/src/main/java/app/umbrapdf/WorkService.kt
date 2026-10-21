@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 
@@ -87,6 +88,9 @@ class WorkService : Service() {
         fun clearDone(ctx: Context) = NotificationManagerCompat.from(ctx).cancel(ID_DONE)
     }
 
+    // Keeps the CPU running while the screen is off (else the phone may sleep mid-page and pause the reading).
+    private var wake: PowerManager.WakeLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -101,11 +105,17 @@ class WorkService : Service() {
         try {
             if (Build.VERSION.SDK_INT >= 29) startForeground(ID_WORK, n, type) else startForeground(ID_WORK, n)
             running = true
+            if (wake == null) wake = getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "umbra:work").apply { acquire(60 * 60 * 1000L) }
         } catch (e: Exception) { android.util.Log.e("umbra", "background work can't start", e); stopSelf() }
         return START_NOT_STICKY
     }
 
-    override fun onDestroy() { running = false; super.onDestroy() }
+    override fun onDestroy() {
+        running = false
+        wake?.let { if (it.isHeld) it.release() }; wake = null
+        super.onDestroy()
+    }
 
     /** Swiped away from Recents: nothing to resume, stop. */
     override fun onTimeout(startId: Int, fgsType: Int) { stopSelf() }

@@ -144,11 +144,14 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
             val px = rd.px; val islands = rd.islands
             val blocks = JSONArray()
             var det = 0L; var rec = 0L; var retry = 0L
-            for (b in islands) {
-                if (job.id != gen) break
+            val crops = islands.map { b ->
                 val crop = ByteArray(b.w * b.h * 4)
                 for (y in 0 until b.h) System.arraycopy(px, ((b.y0 + y) * p.w + b.x0) * 4, crop, y * b.w * 4, b.w * 4)
-                val res = JSONObject(ocr.run(0, b.w, b.h, min(PAGE_LIMIT, max(b.w, b.h)), crop, 0))
+                PpOcr.Block(b.w, b.h, min(PAGE_LIMIT, max(b.w, b.h)), crop, 0)
+            }
+            // All blocks at once: their lines are read together, spread over the cores.
+            for ((b, json) in islands.zip(if (job.id != gen) emptyList() else ocr.runAll(crops))) {
+                val res = JSONObject(json)
                 if (!res.optBoolean("ok")) error(res.optString("error", "OCR failed"))
                 res.optJSONObject("ms")?.let { det += it.optLong("det"); rec += it.optLong("rec"); retry += it.optLong("retry") }
                 val lines = res.getJSONArray("lines")
@@ -165,15 +168,21 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
             val ms = { a: Long, z: Long -> (z - a) / 1_000_000 }
             JSONObject().put("ok", true).put("blocks", blocks).put("ms", JSONObject()
                 .put("render", rd.ms).put("wait", ms(t0, t1)).put("total", ms(t0, System.nanoTime())).put("islands", islands.size)
-                .put("det", det).put("rec", rec).put("retry", retry).put("threads", ocr.threads).put("bg", inBackground())).toString()
+                .put("det", det).put("rec", rec).put("retry", retry).put("threads", ocr.threads).put("rt", ocr.recThreads).put("bg", inBackground()).put("cg", cpuGroup())).toString()
         } catch (e: Throwable) {
             if (job.id != gen) return
             JSONObject().put("ok", false).put("error", e.toString()).toString()
         }
         results[p.index] = out
+        android.util.Log.i("umbra", "scan page ${p.index + 1}: ${out.substringAfter("\"ms\":", "failed")}") // timings only, no text
         job.done++
         events.onPage(p.index, job.done, job.pages.size)
     }
+
+    /** The CPU group Android has put the reading thread in ("top-app", "foreground", "background"...): which cores it may use. */
+    private fun cpuGroup(): String = try {
+        File("/proc/self/task/${android.os.Process.myTid()}/cpuset").readText().trim().trimStart('/').ifEmpty { "all" }
+    } catch (_: Throwable) { "" }
 
     private class Box(val x0: Int, val y0: Int, val w: Int, val h: Int)
 

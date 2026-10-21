@@ -13,7 +13,7 @@ const CARD_HEADER = /^(?:KAD|PENGENALAN|WARGANEGARA|PENDUDUK|KETUA|PENGARAH|PEND
 
 type Waiter = { res: (s: string) => void; rej: (e: Error) => void };
 type Reply = { ok: boolean; error?: string; blocks?: PpLine[][];
-  ms?: { render: number; wait: number; total: number; islands: number; det: number; rec: number; retry: number; threads: number; bg?: boolean } };
+  ms?: { render: number; wait: number; total: number; islands: number; det: number; rec: number; retry: number; threads: number; rt?: number; bg?: boolean; cg?: string } };
 
 export class NativeReader {
   private pages = new Map<number, ScanPage & { scale: number }>();
@@ -71,7 +71,7 @@ export class NativeReader {
     const r = JSON.parse(s) as Reply;
     if (!r.ok) { lastOcrStats.log.push(`page ${i + 1}: native read failed (${r.error}), reading here`); return null; }
     const m = r.ms!;
-    lastOcrStats.log.push(`page ${i + 1} ${p.w}x${p.h} (native ${m.threads} threads${m.bg ? ', app in background' : ''}): ${m.total} ms = render ${m.render} (ahead; waited ${m.wait}) + ${m.islands} block(s): det ${m.det} + rec ${m.rec} + retry ${m.retry}`);
+    lastOcrStats.log.push(`page ${i + 1} ${p.w}x${p.h} (native ${m.threads}${m.rt ? `+${m.rt}` : ''} threads${m.bg ? ', app in background' : ''}${m.cg ? `, cores: ${m.cg}` : ''}): ${m.total} ms = render ${m.render} (ahead; waited ${m.wait}) + ${m.islands} block(s): det ${m.det} + rec ${m.rec} + retry ${m.retry}`);
     const words = wordsFromBlocks(r.blocks!);
     const cards = words.some((w) => CARD_HEADER.test(w.text.replace(/[^\p{L}]/gu, '')));
     if (cards) lastOcrStats.log.push(`page ${i + 1}: ID card wording, finding the cards on it`);

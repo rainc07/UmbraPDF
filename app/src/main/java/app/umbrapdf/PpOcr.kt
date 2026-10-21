@@ -5,6 +5,8 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import java.nio.FloatBuffer
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -26,19 +28,32 @@ class PpOcr(private val load: (String) -> ByteArray) {
     private var det: OrtSession? = null
     private var rec: OrtSession? = null
     private var chars: List<String> = emptyList()
-    val threads = max(1, min(4, Runtime.getRuntime().availableProcessors()))
+    /** Threads for one detection run, and recognition runs side by side: the fast cores (big.LITTLE phones), at most 4 / 6. */
+    private val fast = fastCores()
+    val threads = max(1, min(4, fast))
+    val recThreads = max(1, min(6, fast))
 
     @Synchronized
     fun ensureLoaded(): Long {
         if (det != null) return 0
         val t0 = System.nanoTime()
-        val opts = OrtSession.SessionOptions().apply {
+        // Detection: one big image, so its operators are split over the cores. No spinning once it's done, so
+        // its threads don't hold cores while the lines are read.
+        val detOpts = OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(threads)
+            addConfigEntry("session.intra_op.allow_spinning", "0")
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         }
+        // Recognition: many small strips, so each batch runs on one core and the batches run side by side
+        // (splitting one small strip's operators over 4 cores mostly waits on the other cores).
+        val recOpts = OrtSession.SessionOptions().apply {
+            setIntraOpNumThreads(1)
+            // Not ALL_OPT: its blocked memory layout (x86) spent a fifth of the time converting between layouts here.
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.EXTENDED_OPT)
+        }
         fun asset(n: String) = load(n)
-        det = env.createSession(asset("det.onnx"), opts)
-        rec = env.createSession(asset("rec_en.onnx"), opts)
+        det = env.createSession(asset("det.onnx"), detOpts)
+        rec = env.createSession(asset("rec_en.onnx"), recOpts)
         val lines = String(asset("dict_en.txt"), Charsets.UTF_8).split("\n").map { it.trimEnd('\r') }.toMutableList()
         if (lines.isNotEmpty() && lines.last().isEmpty()) lines.removeAt(lines.size - 1)
         chars = lines + " "
@@ -206,80 +221,126 @@ class PpOcr(private val load: (String) -> ByteArray) {
 
     private class Rec(val text: String, val conf: Float, val chars: List<Triple<String, Float, Float>>)
 
+    // Threads reading line batches side by side (recognition), one ONNX Runtime run each.
+    private val recPool by lazy { Executors.newFixedThreadPool(recThreads) { r -> Thread(r, "umbra-rec").apply { isDaemon = true } } }
+
     private fun recognise(strips: List<FloatArray>, widths: IntArray): Array<Rec> {
         val res = arrayOfNulls<Rec>(strips.size)
         val order = strips.indices.sortedBy { widths[it] }
         val batches = ArrayList<MutableList<Int>>()
         for (i in order) {
             val b = batches.lastOrNull()
-            if (b != null && b.size < 8 && widths[i] <= 1.3f * widths[b[0]]) b.add(i) else batches.add(mutableListOf(i))
+            if (b != null && b.size < BATCH && widths[i] <= 1.15f * widths[b[0]]) b.add(i) else batches.add(mutableListOf(i))
         }
-        for (idx in batches) {
-            val maxW = idx.maxOf { widths[it] }
-            val x = FloatArray(idx.size * 3 * 48 * maxW)
-            idx.forEachIndexed { b, i ->
-                val one = strips[i]; val w = widths[i]
-                for (k in 0 until 3) for (y in 0 until 48) System.arraycopy(one, k * 48 * w + y * w, x, b * 3 * 48 * maxW + k * 48 * maxW + y * maxW, w)
-            }
-            OnnxTensor.createTensor(env, FloatBuffer.wrap(x), longArrayOf(idx.size.toLong(), 3, 48, maxW.toLong())).use { t ->
-                rec!!.run(mapOf("x" to t)).use { out ->
-                    val ot = out[0] as OnnxTensor
-                    val shape = ot.info.shape; val T = shape[1].toInt(); val C = shape[2].toInt()
-                    val fb = ot.floatBuffer; val p = FloatArray(fb.remaining()).also { fb.get(it) }
-                    idx.forEachIndexed { b, i ->
-                        val used = widths[i].toFloat() / maxW * T
-                        var prev = 0; val sb = StringBuilder(); var confSum = 0f
-                        val cs = ArrayList<Triple<String, Float, Float>>()
-                        for (tt in 0 until T) {
-                            var best = 0; var bv = -1f; val o = (b * T + tt) * C
-                            for (c in 0 until C) if (p[o + c] > bv) { bv = p[o + c]; best = c }
-                            if (best != 0 && best != prev) {
-                                val ch = chars.getOrElse(best - 1) { "" }
-                                sb.append(ch); confSum += bv
-                                cs.add(Triple(ch, min(1f, tt / used), min(1f, (tt + 1) / used)))
-                            } else if (best != 0 && best == prev && cs.isNotEmpty()) {
-                                val l = cs.removeAt(cs.size - 1); cs.add(Triple(l.first, l.second, min(1f, (tt + 1) / used)))
-                            }
-                            prev = best
-                        }
-                        res[i] = Rec(sb.toString(), if (cs.isEmpty()) 0f else confSum / cs.size, cs)
-                    }
-                }
-            }
+        // Widest batches first, so the last ones to finish are short.
+        batches.sortByDescending { idx -> idx.size * widths[idx.last()] }
+        batches.map { idx -> recPool.submit { readBatch(idx, strips, widths, res) } }.forEach { f ->
+            try { f.get() } catch (e: ExecutionException) { throw e.cause ?: e }
         }
         return res.map { it!! }.toTypedArray()
     }
 
+    private fun readBatch(idx: List<Int>, strips: List<FloatArray>, widths: IntArray, res: Array<Rec?>) {
+        val maxW = idx.maxOf { widths[it] }
+        val x = FloatArray(idx.size * 3 * 48 * maxW)
+        idx.forEachIndexed { b, i ->
+            val one = strips[i]; val w = widths[i]
+            for (k in 0 until 3) for (y in 0 until 48) System.arraycopy(one, k * 48 * w + y * w, x, b * 3 * 48 * maxW + k * 48 * maxW + y * maxW, w)
+        }
+        OnnxTensor.createTensor(env, FloatBuffer.wrap(x), longArrayOf(idx.size.toLong(), 3, 48, maxW.toLong())).use { t ->
+            rec!!.run(mapOf("x" to t)).use { out ->
+                val ot = out[0] as OnnxTensor
+                val shape = ot.info.shape; val T = shape[1].toInt(); val C = shape[2].toInt()
+                val fb = ot.floatBuffer; val p = FloatArray(fb.remaining()).also { fb.get(it) }
+                idx.forEachIndexed { b, i ->
+                    val used = widths[i].toFloat() / maxW * T
+                    var prev = 0; val sb = StringBuilder(); var confSum = 0f
+                    val cs = ArrayList<Triple<String, Float, Float>>()
+                    for (tt in 0 until T) {
+                        var best = 0; var bv = -1f; val o = (b * T + tt) * C
+                        for (c in 0 until C) if (p[o + c] > bv) { bv = p[o + c]; best = c }
+                        if (best != 0 && best != prev) {
+                            val ch = chars.getOrElse(best - 1) { "" }
+                            sb.append(ch); confSum += bv
+                            cs.add(Triple(ch, min(1f, tt / used), min(1f, (tt + 1) / used)))
+                        } else if (best != 0 && best == prev && cs.isNotEmpty()) {
+                            val l = cs.removeAt(cs.size - 1); cs.add(Triple(l.first, l.second, min(1f, (tt + 1) / used)))
+                        }
+                        prev = best
+                    }
+                    res[i] = Rec(sb.toString(), if (cs.isEmpty()) 0f else confSum / cs.size, cs)
+                }
+            }
+        }
+    }
+
+    /** One image to read: RGBA pixels at `off`, detection run at most `limit` px on the long side. */
+    class Block(val w: Int, val h: Int, val limit: Int, val px: ByteArray, val off: Int)
+
     /** Full read of one image. Returns the JSON reply for JS ({id, ok, lines, ms}). */
-    fun run(id: Int, w: Int, h: Int, limit: Int, px: ByteArray, off: Int): String {
+    fun run(id: Int, w: Int, h: Int, limit: Int, px: ByteArray, off: Int): String = runAll(listOf(Block(w, h, limit, px, off)), id)[0]
+
+    /**
+     * Read several images (the blocks of print on one page): text is found in each in turn, then all their
+     * lines are read together, spread over the cores. One JSON reply per image, as `run`; the page's
+     * recognition time is reported on the first image (rec and retry 0 on the others).
+     */
+    fun runAll(blocks: List<Block>, id: Int = 0): List<String> {
         val load = ensureLoaded()
-        val img = Img(w, h, px, off)
-        val t0 = System.nanoTime()
-        val quads = mergeLine(detect(img, limit)).map { readingOrder(it) }.toMutableList()
-        val widths = IntArray(quads.size) { i ->
-            val q = quads[i]
-            (48f * max(dist(q[0], q[1]), 1f) / max(dist(q[0], q[3]), 1f)).roundToInt().coerceIn(16, 2400)
+        class B(val img: Img, val quads: MutableList<Array<Pt>>, val widths: IntArray, val strips: List<FloatArray>, val det: Long) {
+            lateinit var recs: Array<Rec>
+            var flipped = false
         }
-        val strips = quads.mapIndexed { i, q -> strip(img, q, widths[i]) }
+        val bs = blocks.map { b ->
+            val img = Img(b.w, b.h, b.px, b.off)
+            val t0 = System.nanoTime()
+            val quads = mergeLine(detect(img, b.limit)).map { readingOrder(it) }.toMutableList()
+            val widths = IntArray(quads.size) { i ->
+                val q = quads[i]
+                (48f * max(dist(q[0], q[1]), 1f) / max(dist(q[0], q[3]), 1f)).roundToInt().coerceIn(16, 2400)
+            }
+            val strips = quads.mapIndexed { i, q -> strip(img, q, widths[i]) }
+            B(img, quads, widths, strips, (System.nanoTime() - t0) / 1_000_000)
+        }
         val t1 = System.nanoTime()
-        var recs = if (strips.isEmpty()) emptyArray() else recognise(strips, widths)
-        // Upside down: if most long lines read poorly, read all again turned 180°. Else retry a few weak lines.
-        val long = widths.indices.filter { widths[it] >= 96 }
-        var weak = long.filter { recs[it].conf < 0.7f }
-        var flipped = false
+        val all = recognise(bs.flatMap { it.strips }, bs.flatMap { it.widths.asList() }.toIntArray())
+        var k = 0
+        for (b in bs) { b.recs = all.copyOfRange(k, k + b.strips.size); k += b.strips.size }
         val t2 = System.nanoTime()
-        if (long.size >= 3 && weak.size > long.size / 2) {
-            val again = recognise(strips.mapIndexed { i, s -> flipStrip(s, widths[i]) }, widths)
-            fun mean(r: Array<Rec>) = long.map { r[it].conf }.average()
-            if (mean(again) > mean(recs) + 0.1) { recs = again; flipped = true; for (i in quads.indices) quads[i] = arrayOf(quads[i][2], quads[i][3], quads[i][0], quads[i][1]) }
-            weak = emptyList()
+        // Upside down: if most long lines of a block read poorly, read all of it again turned 180°. Else retry a few weak lines.
+        class Again(val b: B, val i: Int, val whole: Boolean)
+        val again = ArrayList<Again>()
+        for (b in bs) {
+            val long = b.widths.indices.filter { b.widths[it] >= 96 }
+            val weak = long.filter { b.recs[it].conf < 0.7f }
+            if (long.size >= 3 && weak.size > long.size / 2) b.strips.indices.forEach { again.add(Again(b, it, true)) }
+            else weak.take(6).forEach { again.add(Again(b, it, false)) }
         }
-        weak = weak.take(6)
-        if (weak.isNotEmpty()) {
-            val again = recognise(weak.map { flipStrip(strips[it], widths[it]) }, IntArray(weak.size) { widths[weak[it]] })
-            weak.forEachIndexed { k, i -> if (again[k].conf > recs[i].conf + 0.1f) { recs[i] = again[k]; quads[i] = arrayOf(quads[i][2], quads[i][3], quads[i][0], quads[i][1]) } }
+        if (again.isNotEmpty()) {
+            val r = recognise(again.map { flipStrip(it.b.strips[it.i], it.b.widths[it.i]) }, IntArray(again.size) { again[it].b.widths[again[it].i] })
+            fun turn(q: Array<Pt>) = arrayOf(q[2], q[3], q[0], q[1])
+            for (b in bs) {
+                val idx = again.indices.filter { again[it].b === b }
+                if (idx.isEmpty()) continue
+                if (again[idx[0]].whole) {
+                    val long = b.widths.indices.filter { b.widths[it] >= 96 }
+                    val flip = Array(b.strips.size) { i -> r[idx[i]] }
+                    if (long.map { flip[it].conf }.average() > long.map { b.recs[it].conf }.average() + 0.1) {
+                        b.recs = flip; b.flipped = true
+                        for (i in b.quads.indices) b.quads[i] = turn(b.quads[i])
+                    }
+                } else for (j in idx) {
+                    val i = again[j].i
+                    if (r[j].conf > b.recs[i].conf + 0.1f) { b.recs[i] = r[j]; b.quads[i] = turn(b.quads[i]) }
+                }
+            }
         }
         val t3 = System.nanoTime()
+        val ms = { a: Long, z: Long -> (z - a) / 1_000_000 }
+        return bs.mapIndexed { n, b -> reply(id, b.quads, b.recs, load, b.det, if (n == 0) ms(t1, t2) else 0, if (n == 0) ms(t2, t3) else 0, b.flipped) }
+    }
+
+    private fun reply(id: Int, quads: List<Array<Pt>>, recs: Array<Rec>, load: Long, det: Long, rec: Long, retry: Long, flipped: Boolean): String {
         val sb = StringBuilder(4096)
         sb.append("{\"id\":").append(id).append(",\"ok\":true,\"lines\":[")
         var first = true
@@ -293,9 +354,8 @@ class PpOcr(private val load: (String) -> ByteArray) {
             r.chars.forEachIndexed { k, c -> if (k > 0) sb.append(','); sb.append("{\"c\":").append(quote(c.first)).append(",\"u0\":").append(c.second).append(",\"u1\":").append(c.third).append('}') }
             sb.append("]}")
         }
-        val ms = { a: Long, b: Long -> (b - a) / 1_000_000 }
-        sb.append("],\"ms\":{\"load\":").append(load).append(",\"det\":").append(ms(t0, t1)).append(",\"rec\":").append(ms(t1, t2))
-            .append(",\"retry\":").append(ms(t2, t3)).append(",\"lines\":").append(quads.size).append(",\"threads\":").append(threads)
+        sb.append("],\"ms\":{\"load\":").append(load).append(",\"det\":").append(det).append(",\"rec\":").append(rec)
+            .append(",\"retry\":").append(retry).append(",\"lines\":").append(quads.size).append(",\"threads\":").append(threads)
             .append(",\"flipped\":").append(flipped).append("}}")
         return sb.toString()
     }
@@ -312,4 +372,19 @@ class PpOcr(private val load: (String) -> ByteArray) {
     }
 
     fun close() { det?.close(); rec?.close(); det = null; rec = null }
+
+    companion object {
+        private const val BATCH = 4 // lines per recognition run
+
+        /** Cores within 70% of the fastest core's top speed (all of them if the speeds can't be read). */
+        fun fastCores(): Int {
+            val n = Runtime.getRuntime().availableProcessors()
+            val f = (0 until n).mapNotNull { i ->
+                try { java.io.File("/sys/devices/system/cpu/cpu$i/cpufreq/cpuinfo_max_freq").readText().trim().toLong() } catch (_: Throwable) { null }
+            }
+            if (f.size < n || f.isEmpty()) return n
+            val top = f.max()
+            return f.count { it >= top * 0.7 }
+        }
+    }
 }
