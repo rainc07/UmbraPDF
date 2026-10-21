@@ -23,7 +23,8 @@ import kotlin.math.roundToInt
  * (Android freezes a hidden page's scripts). For each page: PdfRenderer renders it at the size the web core
  * asked for, its blocks of print are found (same rule as inkIslands in ppocr.ts) and each block is read with
  * PpOcr. Results stay here, in page pixels, until the web core takes them (it then finds ID cards and builds
- * the page text itself). Each page is its own task on the OCR thread, so the page's own OCR requests interleave.
+ * the page text itself). Pages are queued one at a time on the OCR thread (the next after the last one ends),
+ * so the page's own OCR requests (ID cards) wait for one page at most, not for the rest of the document.
  */
 class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, private val events: Events) {
     interface Events {
@@ -47,22 +48,34 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
 
     private val results = ConcurrentHashMap<Int, String>()
     @Volatile private var gen = 0
+    @Volatile private var current: Job? = null
     @Volatile var running = false
         private set
 
-    /** Start reading pages of `file` (pages already read are skipped). Replaces any running job. */
+    /** Start reading pages of `file` (pages already read are skipped). A job already reading them carries on. */
     fun start(file: File, pages: List<Page>): Boolean {
+        val cur = current
+        if (running && cur != null && cur.id == gen && cur.file == file && pages.all { p -> results.containsKey(p.index) || cur.pages.any { it.index == p.index } }) return true
         cancel(notify = false)
         val todo = pages.filter { !results.containsKey(it.index) }
         if (todo.isEmpty()) return true
         val job = Job(++gen, file, todo)
+        current = job
         running = true
-        for (p in todo) exec.execute { if (job.id == gen) readPage(job, p) }
-        exec.execute {
-            job.close()
-            if (job.id == gen) { running = false; events.onFinished(false) }
-        }
+        step(job, 0)
         return true
+    }
+
+    private fun step(job: Job, k: Int) {
+        try {
+            exec.execute {
+                when {
+                    job.id != gen -> job.close()
+                    k == job.pages.size -> { job.close(); running = false; events.onFinished(false) }
+                    else -> { readPage(job, job.pages[k]); step(job, k + 1) }
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) { job.close() } // app closing
     }
 
     /** Stop after the page being read. Pages already read stay available. */

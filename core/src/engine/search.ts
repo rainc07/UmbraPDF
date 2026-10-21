@@ -2,7 +2,7 @@
 // Text pages: pdf.js getTextContent + canvas measureText with the page's loaded font, scaled to item.width.
 // Image-only pages: OCR (tesseract) with glyph boxes.
 import type { TextItem, TextStyle } from 'pdfjs-dist/types/src/display/api';
-import { recognizeWordsRobust, lastOcrStats, getOcrEngine, type OcrWord } from './ocr';
+import { recognizeWordsRobust, readCards, lastOcrStats, getOcrEngine, type OcrWord } from './ocr';
 import { OPS, renderToCanvas, Util, type PDFDocumentProxy, type PDFPageProxy } from './pdf';
 import type { Rect } from './types';
 
@@ -34,8 +34,11 @@ export interface ExtractOptions {
   ocr: 'auto' | 'never' | 'always';
   ocrDpi: number;
   onStatus?: (s: string) => void;
-  /** A scanned page already read elsewhere (the native scan): words in px at `scale`, or null to read it here. */
-  preread?: (index: number) => Promise<{ words: OcrWord[]; scale: number } | null>;
+  /**
+   * A scanned page already read elsewhere (the native scan): words in px at `scale`, or null to read it here.
+   * `cards`: it shows ID-card wording, so the cards on it are found and read here (the rest is kept).
+   */
+  preread?: (index: number) => Promise<{ words: OcrWord[]; scale: number; cards: boolean } | null>;
 }
 const DEFAULT_EXTRACT: ExtractOptions = { ocr: 'auto', ocrDpi: 0 };
 /** Page render resolution for OCR when not set: PaddleOCR reads well at 220 DPI (less to render and move), Tesseract wants 300. */
@@ -180,17 +183,17 @@ export function ocrScale(page: PDFPageProxy, dpi: number): number {
 async function ocrLayer(page: PDFPageProxy, index: number, dpi: number, onStatus: (s: string) => void, preread?: ExtractOptions['preread']): Promise<PageText> {
   const b = new Builder();
   const pre = await preread?.(index);
-  if (pre) {
+  if (pre && !pre.cards) {
     pushWords(b, pre.words, pre.scale);
     return { page: index, text: b.text, boxes: b.boxes, groups: b.groups, source: 'ocr' };
   }
-  const scale = ocrScale(page, dpi);
+  const scale = pre?.scale ?? ocrScale(page, dpi);
   const canvas = document.createElement('canvas');
   try {
     const tr = performance.now();
     await renderToCanvas(page, canvas, scale);
     lastOcrStats.log.push(`render ${canvas.width}x${canvas.height}: ${Math.round(performance.now() - tr)} ms`);
-    pushWords(b, await recognizeWordsRobust(canvas, onStatus), scale);
+    pushWords(b, pre ? await readCards(canvas, pre.words) : await recognizeWordsRobust(canvas, onStatus), scale);
   } finally {
     canvas.width = canvas.height = 0;
   }

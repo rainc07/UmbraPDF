@@ -4,9 +4,12 @@
 import type { PDFDocumentProxy } from '../engine/pdf';
 import { defaultOcrDpi, MIN_TEXT_CHARS, ocrScale } from '../engine/search';
 import { getOcrEngine, lastOcrStats, type OcrWord } from '../engine/ocr';
-import { cardLike, wordsFromBlocks } from '../engine/ppocr';
+import { wordsFromBlocks } from '../engine/ppocr';
 import type { PpLine } from '../engine/ppocr.worker';
 import type { NativeScan, ScanPage } from './host';
+
+/** Wording printed on MyKad-family cards (not "Malaysia" or "identity", which ordinary letters use too). */
+const CARD_HEADER = /^(?:KAD|PENGENALAN|WARGANEGARA|PENDUDUK|KETUA|PENGARAH|PENDAFTARAN|MYKAD|MYPR|MYKID|MYKAS)$/i;
 
 type Waiter = { res: (s: string) => void; rej: (e: Error) => void };
 type Reply = { ok: boolean; error?: string; blocks?: PpLine[][];
@@ -55,7 +58,7 @@ export class NativeReader {
   }
 
   /** A page read natively, as words in px at `scale`; null to read it in the web core (not scanned, failed, ID card). */
-  async words(i: number): Promise<{ words: OcrWord[]; scale: number } | null> {
+  async words(i: number): Promise<{ words: OcrWord[]; scale: number; cards: boolean } | null> {
     const p = this.pages.get(i);
     if (!p) return null;
     let s = this.scan.take(i);
@@ -70,8 +73,9 @@ export class NativeReader {
     const m = r.ms!;
     lastOcrStats.log.push(`page ${i + 1} ${p.w}x${p.h} (native ${m.threads} threads): ${m.total} ms = render ${m.render} + ${m.islands} block(s): det ${m.det} + rec ${m.rec} + retry ${m.retry}`);
     const words = wordsFromBlocks(r.blocks!);
-    if (cardLike(words)) { lastOcrStats.log.push(`page ${i + 1}: ID card wording, reading again with the card search`); return null; }
-    return { words, scale: p.scale };
+    const cards = words.some((w) => CARD_HEADER.test(w.text.replace(/[^\p{L}]/gu, '')));
+    if (cards) lastOcrStats.log.push(`page ${i + 1}: ID card wording, finding the cards on it`);
+    return { words, scale: p.scale, cards };
   }
 
   private check(i: number) {

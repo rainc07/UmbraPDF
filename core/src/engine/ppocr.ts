@@ -244,10 +244,13 @@ const CARD_DET_LIMIT = 640;
  * Read a page (or a picture) with PaddleOCR. Cards are found first (no OCR) and each is read upright at its
  * own size; the rest of the page is read once with the cards blanked out. Returns canvas-pixel words.
  * `onCardWords` lets the caller post-process a card's words in the card's upright frame (W×H) before mapping.
+ * `base`: the page was already read plainly (the native scan). Only the cards are read; their words replace
+ * the base words inside them, and the rest of the page keeps the base read.
  */
 export async function ppocrPage(
   canvas: HTMLCanvasElement,
   onCardWords: (words: OcrWord[], W: number, H: number) => OcrWord[] = (w) => w,
+  base?: OcrWord[],
 ): Promise<OcrWord[]> {
   const W = canvas.width, H = canvas.height;
   const centre = (q: Quad): P => [q.reduce((s, p) => s + p[0], 0) / 4, q.reduce((s, p) => s + p[1], 0) / 4];
@@ -274,6 +277,7 @@ export async function ppocrPage(
   ppStats.log.push(`locate: ${Math.round(performance.now() - t0)} ms, ${quads.length} card-like region(s)`);
 
   const restRead = (async () => {
+  if (base) return [];
   const words: OcrWord[] = [];
   // The rest of the page, with candidate cards blanked, cropped to what is still printed. Skipped for a
   // photo of a card (the card fills much of the frame; the rest is background).
@@ -324,15 +328,19 @@ export async function ppocrPage(
       const flip = (l: PpLine): PpLine => ({ ...l, quad: l.quad.map(([x, y]) => [cw - x, ch - y] as P) });
       ws = linesToWords(lines.map(flip));
     }
+    if (base && !isCard) return null; // not a card: the base read of that part of the page stands
     if (isCard) {
       // MyKad-family cards are printed in capitals; a mixed-case reading is the OCR's guess.
       ws = ws.map((w) => ({ ...w, text: w.text.toUpperCase(), symbols: w.symbols.map((s) => ({ ...s, text: s.text.toUpperCase() })) }));
       ws = onCardWords(ws, cw, ch);
     }
-    return mapToPage(ws, qq, cw, ch);
+    return { q, words: mapToPage(ws, qq, cw, ch) };
   });
-  const [restWords, cards] = await Promise.all([restRead, Promise.all(cardReads)]);
-  const words = [...restWords];
+  const [restWords, reads] = await Promise.all([restRead, Promise.all(cardReads)]);
+  const cards = reads.filter((r) => r !== null).map((r) => r.words);
+  const cardQuads = reads.filter((r) => r !== null).map((r) => r.q);
+  const outside = (w: OcrWord) => !cardQuads.some((q) => inQuad(q, (w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2));
+  const words = base ? base.filter(outside) : [...restWords];
   let line = words.length ? Math.max(...words.map((w) => w.line)) + 1 : 0;
   for (const ws of cards) {
     for (const w of ws) words.push({ ...w, line: line + w.line });

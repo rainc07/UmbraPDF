@@ -688,6 +688,17 @@ async function readWithCards(canvas: HTMLCanvasElement, quads: { q: Quad; sure: 
  * 4. if the page still reads poorly, it may be sideways or upside down: 90°/180°/270° are probed on a small copy.
  * Every extra step runs only when the cheaper ones were not enough.
  */
+/**
+ * A page already read plainly (the native scan) that shows ID-card wording: find the cards and read just
+ * them; the rest of the page keeps the plain read. Canvas pixels, same frame as `base`.
+ */
+export async function readCards(canvas: HTMLCanvasElement, base: OcrWord[]): Promise<OcrWord[]> {
+  const t = lastOcrStats, tp = performance.now();
+  ppStats.log = t.log;
+  try { return await ppocrPage(canvas, (ws, W, H) => (hasIc(ws) || ws.some((w) => PARTIAL_IC.test(w.text)) ? ws : markUnreadIc(ws, W, H)), base); }
+  finally { t.log.push(`cards on a natively read page: ${Math.round(performance.now() - tp)} ms`); }
+}
+
 export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: (s: string) => void = () => {}, allowTurn = true): Promise<OcrWord[]> {
   const t = lastOcrStats;
   const tw = performance.now();

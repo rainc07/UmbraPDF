@@ -218,7 +218,8 @@ class MainActivity : ComponentActivity() {
         if (scanning) WorkService.progress(this, title, "", -1) else WorkService.start(this, title)
     }
 
-    fun workProgress(text: String, pct: Int) { if (jsWork) WorkService.progress(this, workTitle, text, pct) }
+    // While pages are read natively, the notification counts those (the page's own count would jump back and forth).
+    fun workProgress(text: String, pct: Int) { if (jsWork && !scanning) WorkService.progress(this, workTitle, text, pct) }
 
     fun workDone(title: String, text: String) {
         val was = jsWork
