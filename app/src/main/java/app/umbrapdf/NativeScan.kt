@@ -32,7 +32,7 @@ import kotlin.math.roundToInt
  * so the page's own OCR requests (ID cards) wait for one page at most, not for the rest of the document.
  * The next page is rendered on its own thread while the current one is read.
  */
-class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, private val events: Events) {
+class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, private val events: Events, private val inBackground: () -> Boolean) {
     interface Events {
         fun onPage(index: Int, done: Int, total: Int)
         fun onFinished(cancelled: Boolean)
@@ -53,7 +53,10 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
     }
 
     private val results = ConcurrentHashMap<Int, String>()
-    private val renderExec = Executors.newSingleThreadExecutor() // PdfRenderer is only used on this thread
+    // PdfRenderer is only used on this thread. Low priority: rendering ahead mustn't take cores from the OCR.
+    private val renderExec = Executors.newSingleThreadExecutor { r ->
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run() }, "umbra-render")
+    }
     @Volatile private var gen = 0
     @Volatile private var current: Job? = null
     @Volatile var running = false
@@ -162,7 +165,7 @@ class NativeScan(private val ocr: PpOcr, private val exec: ExecutorService, priv
             val ms = { a: Long, z: Long -> (z - a) / 1_000_000 }
             JSONObject().put("ok", true).put("blocks", blocks).put("ms", JSONObject()
                 .put("render", rd.ms).put("wait", ms(t0, t1)).put("total", ms(t0, System.nanoTime())).put("islands", islands.size)
-                .put("det", det).put("rec", rec).put("retry", retry).put("threads", ocr.threads)).toString()
+                .put("det", det).put("rec", rec).put("retry", retry).put("threads", ocr.threads).put("bg", inBackground())).toString()
         } catch (e: Throwable) {
             if (job.id != gen) return
             JSONObject().put("ok", false).put("error", e.toString()).toString()

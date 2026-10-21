@@ -105,7 +105,7 @@ class MainActivity : ComponentActivity() {
         ocr = PpOcr { n -> assets.open("web/vendor/ppocr/$n").use { it.readBytes() } }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
         nativeOcrBinary = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)
-        scan = NativeScan(ocr, ocrExec, scanEvents)
+        scan = NativeScan(ocr, ocrExec, scanEvents) { !visible }
         WebViewCompat.addWebMessageListener(web, "UmbraOcr", setOf("https://$HOST")) { _, message, _, isMainFrame, reply ->
             if (!isMainFrame) return@addWebMessageListener
             val bin = if (nativeOcrBinary && message.type == WebMessageCompat.TYPE_ARRAY_BUFFER) message.arrayBuffer else null
