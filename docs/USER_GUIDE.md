@@ -8,9 +8,9 @@ Tap **Open a PDF** on the start screen. You can also use "Open with → Umbra PD
 With a document open, **Find**, **Auto Detect** and **Export** are at the top right, and **←** (or the Back button) returns to the start screen. Settings are on the start screen.
 
 ## 2. Redact by hand
-- Pick **Redact** in the bottom bar, then drag a box over anything you want hidden.
+- A document opens in **Scroll** mode. Pick **Redact** in the bottom bar (or swipe right on the Scroll | Redact switch), then drag a box over anything you want hidden.
 - Tap a box to select it, then tap **×** to remove it. **Undo** reverts your last step and **Redo** puts it back. **Reset** removes every box on every page (it asks first, and Undo brings them back).
-- Switch to **Scroll** to move around the page without drawing.
+- Switch back to **Scroll** (or swipe left on the switch) to move around the page without drawing.
 - **Zoom:** pinch with two fingers (works in Redact mode too; two fingers never draw a box), double-tap to switch between fit-to-width and close-up, or use **−** / **+**. On a computer, Ctrl + mouse wheel or a trackpad pinch also zoom.
 
 ## 3. Manual find & redact (search)
@@ -42,6 +42,8 @@ Tap **Auto Detect**, then **Scan document** at the top. **Advanced config** (col
 | Custom pattern | your own regular expression, e.g. `EMP-\d{5}` |
 
 **ID cards and other pictures:** scanned pages, photos and pictures pasted into a typed document (for example a copy of an IC in a Word file saved as PDF) are read with on-device OCR. Hard backgrounds such as the patterned print on a MyKad get a second, cleaned-up OCR pass. This takes a few extra seconds per picture.
+
+**Scanning in the background (Android):** scanned pages start being read as soon as you open the document, and reading carries on if you switch to another app, with a progress notification. When a scan finishes while you're away, a notification says it's ready to review. To stop a scan, tap **Stop** in the panel or press Back; pages already read are kept, so scanning again picks up where it stopped.
 
 How the review works:
 - **Amber dashed box**: will be redacted.

@@ -13,7 +13,6 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.app.ServiceCompat
 
 /**
  * Keeps the app running while it scans or prepares a file in the background (the user switched apps),
@@ -29,6 +28,10 @@ class WorkService : Service() {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_TEXT = "text"
         private const val EXTRA_PCT = "pct"
+
+        /** Whether the service is in the foreground now (progress updates go to its notification only then). */
+        @Volatile var running = false
+            private set
 
         fun channels(ctx: Context) {
             if (Build.VERSION.SDK_INT < 26) return
@@ -60,11 +63,14 @@ class WorkService : Service() {
         }
 
         fun progress(ctx: Context, title: String, text: String, pct: Int) {
-            if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return
+            if (!running || !NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return
             try { NotificationManagerCompat.from(ctx).notify(ID_WORK, working(ctx, title, text, pct)) } catch (e: SecurityException) { }
         }
 
-        fun stop(ctx: Context) { ctx.stopService(Intent(ctx, WorkService::class.java)) }
+        fun stop(ctx: Context) {
+            ctx.stopService(Intent(ctx, WorkService::class.java))
+            NotificationManagerCompat.from(ctx).cancel(ID_WORK) // a progress update may have re-posted it
+        }
 
         /** "Ready" notification; only shown when the user isn't looking at the app. */
         fun done(ctx: Context, title: String, text: String) {
@@ -90,9 +96,16 @@ class WorkService : Service() {
             Build.VERSION.SDK_INT >= 29 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             else -> 0
         }
-        try { ServiceCompat.startForeground(this, ID_WORK, n, type) } catch (e: Exception) { stopSelf() }
+        // Straight to the framework: ServiceCompat (core 1.13) drops types it doesn't know (mediaProcessing, API 35),
+        // and a foreground service with no type is refused from API 34 on.
+        try {
+            if (Build.VERSION.SDK_INT >= 29) startForeground(ID_WORK, n, type) else startForeground(ID_WORK, n)
+            running = true
+        } catch (e: Exception) { android.util.Log.e("umbra", "background work can't start", e); stopSelf() }
         return START_NOT_STICKY
     }
+
+    override fun onDestroy() { running = false; super.onDestroy() }
 
     /** Swiped away from Recents: nothing to resume, stop. */
     override fun onTimeout(startId: Int, fgsType: Int) { stopSelf() }

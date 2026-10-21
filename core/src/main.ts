@@ -7,9 +7,9 @@ import {
   type Hit, type SearchPattern, type CustomPattern,
 } from './engine';
 import { lastOcrStats, resetOcrStats, setOcrEngine, warmUpOcr } from './engine/ocr';
+import { abortable, isAbort } from './engine/search';
 import { detectHost, type OpenedFile } from './platform/host';
-import { keepWorkingWhenHidden } from './platform/background';
-keepWorkingWhenHidden();
+import { NativeReader } from './platform/nativeRead';
 
 const host = detectHost();
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => document.querySelector(s) as T;
@@ -28,7 +28,7 @@ const S = {
   undo: [] as Action[],
   redo: [] as Action[],
   zoom: 1, // CSS px per PDF point
-  mode: 'draw' as 'draw' | 'pan',
+  mode: 'pan' as 'draw' | 'pan', // Scroll first: a stray touch shouldn't draw a box
   sel: null as { page: number; idx: number } | null,
   rendered: new Set<number>(),
   gen: 0, // invalidates in-flight renders after zoom/open
@@ -36,6 +36,9 @@ const S = {
   sugg: [] as Sugg[],
   panel: null as 'find' | 'detect' | null,
   texts: null as PageTextCache | null,
+  native: null as NativeReader | null, // scanned pages read by the host (keeps going in the background)
+  scan: null as AbortController | null, // running Find / Auto Detect scan (Stop)
+  prefetch: null as AbortController | null,
   dirty: false, // unsaved redaction changes
   findTerms: [] as { q: string; matchCase: boolean; wholeWord: boolean }[],
   resTab: 'items' as 'items' | 'types' | 'done',
@@ -108,7 +111,7 @@ async function askPassword(incorrect: boolean): Promise<string | null> {
     modal(`<h2>Password required</h2>
       ${incorrect ? '<p class="fail">Incorrect password.</p>' : ''}
       <input id="pw" type="password" autocomplete="off" style="width:100%">
-      <div class="row"><button id="pw-cancel">Cancel</button><button id="pw-ok" class="primary">Open</button></div>`);
+      <div class="row"><button id="pw-cancel">Cancel</button><button id="pw-ok" class="primary">Open</button></div>`, true, () => resolve(null));
     const pw = $<HTMLInputElement>('#pw');
     pw.focus();
     const done = (v: string | null) => { closeModal(); resolve(v); };
@@ -143,9 +146,14 @@ async function loadFile(file: OpenedFile) {
   S.dirty = false;
   S.sel = null;
   S.sugg = [];
-  S.texts = new PageTextCache(doc);
+  stopBackground();
+  // Scanned pages are read natively where the host can (Android): that keeps going in the background.
+  const reader = NativeReader.start(doc, host.nativeScan?.()).catch(() => null);
+  void reader.then((r) => { if (S.doc === doc) S.native = r; else r?.cancel(); });
+  S.texts = new PageTextCache(doc, { preread: async (i) => (await reader)?.words(i) ?? null });
   warmUpOcr(); // load the OCR engine now, while the user looks at the document
-  void prefetchText(S.texts);
+  S.prefetch = new AbortController();
+  void prefetchText(S.texts, S.prefetch.signal);
   closePanel();
   S.zoom = fitZoom();
   buildPages();
@@ -179,6 +187,8 @@ async function closeDocument() {
   await new Promise((r) => setTimeout(r, 230));
   viewer.classList.remove('leaving');
   io.disconnect();
+  stopBackground();
+  host.closeFile?.();
   if (S.doc) await closePdf(S.doc);
   Object.assign(S, { doc: null, name: '', sizes: [], boxes: [], undo: [], redo: [], sel: null, sugg: [], texts: null, dirty: false, applied: [], bytes: null, password: undefined });
   S.gen++;
@@ -194,9 +204,10 @@ function confirmLeave(onYes: () => void) {
   $('#c-yes').onclick = () => { closeModal(); onYes(); };
 }
 
-/** Android Back: close dialog → close panel → leave document (asking if unsaved) → let the OS handle it. */
+/** Android Back: close dialog → stop a scan (asks) → close panel → leave document (asking if unsaved) → let the OS handle it. */
 function handleBack(): boolean {
   if (dismissModal()) return true;
+  if (S.scan) { askStopScan(); return true; }
   if (S.busy) return true;
   if (S.panel) { closePanel(true); return true; }
   if (S.doc) {
@@ -927,7 +938,7 @@ function bindResults() {
  * Every value Auto Detect found (a labelled name, an address…) is searched for again across the whole
  * document, so the same text is caught where it appears without a label (cover page, signature block).
  */
-async function withRepeats(found: Hit[]): Promise<Hit[]> {
+async function withRepeats(found: Hit[], signal?: AbortSignal): Promise<Hit[]> {
   if (!S.texts) return found;
   const seen = new Map<string, string>();
   for (const h of found) {
@@ -937,7 +948,7 @@ async function withRepeats(found: Hit[]): Promise<Hit[]> {
   const pats: SearchPattern[] = [];
   [...seen].forEach(([t, label], i) => { const re = literalPattern(t, false, true); if (re) pats.push({ id: `repeat.${i}`, label, regex: re }); });
   if (!pats.length) return found;
-  const more = await searchDocument(S.texts, pats, (m) => status(`Looking for the same details elsewhere… ${m}`));
+  const more = await searchDocument(S.texts, pats, (m) => status(`Looking for the same details elsewhere… ${m}`), signal);
   const out = [...found];
   for (const h of more) {
     if (!out.some((o) => o.page === h.page && h.start < o.end && o.start < h.end)) out.push({ ...h, label: `${h.label} · repeat` });
@@ -949,13 +960,35 @@ async function withRepeats(found: Hit[]): Promise<Hit[]> {
  * Read every page's text in the background as soon as a document is open (OCR for scanned pages), so
  * Auto Detect, Find and the copy-ready export find it done. Same cache: a scan just waits for pages in progress.
  */
-async function prefetchText(cache: PageTextCache) {
+async function prefetchText(cache: PageTextCache, signal: AbortSignal) {
   await new Promise((r) => setTimeout(r, 300)); // let the first pages paint
   // One page at a time, in order (two at once competed for memory and the main thread, and was slower).
   for (let i = 0; i < cache.doc.numPages; i++) {
-    if (S.texts !== cache) return; // another document was opened
-    try { await cache.get(i); } catch { return; }
+    if (S.texts !== cache || signal.aborted) return; // another document was opened, or reading was stopped
+    try { await abortable(cache.get(i), signal); } catch { return; }
   }
+}
+
+/** Stop reading the open document in the background (native scan and prefetch). Pages already read stay cached. */
+function stopBackground() {
+  S.prefetch?.abort(); S.prefetch = null;
+  S.native?.cancel(); S.native = null;
+}
+
+/** Back or Stop during a scan: ask, then stop. Pages already read stay cached, so a new scan picks up from there. */
+function askStopScan() {
+  if (!S.scan) return;
+  const auto = S.panel === 'detect';
+  modal(`<h2>${auto ? 'Stop auto redaction?' : 'Stop searching?'}</h2>
+    <p class="hint">Pages already read are kept, so scanning again picks up where it stopped.</p>
+    <div class="row"><button id="st-no">Keep going</button><button id="st-yes" class="primary danger">Stop</button></div>`, true);
+  $('#st-no').onclick = closeModal;
+  $('#st-yes').onclick = () => {
+    closeModal();
+    S.scan?.abort();
+    S.prefetch?.abort(); S.prefetch = null;
+    S.native?.cancel();
+  };
 }
 
 /**
@@ -975,13 +1008,20 @@ let work: ReturnType<typeof startWork> | null = null;
 async function runScan(patterns: SearchPattern[], what: string, repeats = false) {
   if (!S.texts || S.busy) return;
   S.busy = true; syncToolbar();
+  const ac = new AbortController();
+  S.scan = ac;
+  const stop = document.createElement('button');
+  stop.id = 'p-stop'; stop.className = 'danger'; stop.textContent = 'Stop';
+  stop.onclick = askStopScan;
+  document.getElementById('p-status')?.after(stop);
   try {
     resetOcrStats();
+    S.native?.resume(); // after a stopped scan: read the rest natively again
     work = startWork(`Scanning ${what}`);
     const t0 = performance.now();
-    let all = await searchDocument(S.texts, patterns, (m, f) => { status(m); work?.progress(m.replace(/:.*/, ''), f); });
+    let all = await searchDocument(S.texts, patterns, (m, f) => { status(m); work?.progress(m.replace(/:.*/, ''), f); }, ac.signal);
     const t1 = performance.now();
-    if (repeats) all = await withRepeats(all);
+    if (repeats) all = await withRepeats(all, ac.signal);
     lastOcrStats.log.push(`scan: read+match ${Math.round(t1 - t0)} ms, repeats ${Math.round(performance.now() - t1)} ms`);
     // Don't offer what is already redacted (each rect fully inside an existing box). Partly covered hits are still offered.
     const hits = all.filter((h) => !alreadyRedacted(h));
@@ -996,10 +1036,18 @@ async function runScan(patterns: SearchPattern[], what: string, repeats = false)
     work?.done('Scan finished', hits.length ? `${hits.length} item(s) found. Ready to review.` : 'Nothing found. Ready to review.');
     work = null;
   } catch (e) {
+    if (isAbort(e)) {
+      work?.done('Scan stopped', 'You stopped the scan.'); work = null;
+      status('Stopped. Pages already read are kept: scanning again picks up from there.');
+      return;
+    }
     work?.done('Scan stopped', 'Something went wrong. Open Umbra PDF for details.'); work = null;
     status(`Failed: ${(e as Error).message}`);
     toast((e as Error).message, 5000);
   } finally {
+    S.scan = null;
+    stop.remove();
+    if (document.getElementById('st-yes')) closeModal(); // "Stop?" was still open: nothing left to stop
     S.busy = false; syncToolbar();
   }
 }
@@ -1248,7 +1296,7 @@ function exportDialog() {
           ? 'Parts of this file are switched off and never shown, so they couldn\'t be reviewed. Nothing was saved. Export again with "Image only", which keeps only what you can see.'
           : 'Nothing was saved. Try again, or pick a lower quality if the file is very large.'}</p>
         <details><summary>Details</summary><p>${esc((e as Error).message)}</p></details>
-        <div class="row"><button id="r-close">Close</button></div>`);
+        <div class="row"><button id="r-close">Close</button></div>`, true);
       $('#r-close').onclick = closeModal;
     } finally {
       S.busy = false; syncToolbar();
@@ -1280,7 +1328,7 @@ function resultDialog(out: ExportOutcome) {
       <p class="hint">We checked the copy: no hidden text, links, forms or file details, and nothing readable under the black boxes.${report.searchable ? ' Visible text stays searchable.' : ''}</p>
       <p class="note">${report.pages} page(s) · ${bytes.length >= 1048576 ? `${(bytes.length / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes.length / 1024))} KB`}</p>
       ${prefs.advanced ? `<details open><summary>Technical report</summary>${technicalReport(out)}</details>` : ''}
-      <div class="row"><button id="r-close">Cancel</button><button id="r-save" class="primary">Save PDF</button></div>`);
+      <div class="row"><button id="r-close">Cancel</button><button id="r-save" class="primary">Save PDF</button></div>`, true);
     $('#r-close').onclick = closeModal;
     $('#r-save').onclick = async () => {
       const ok = await host.savePdf(`${S.name}-redacted.pdf`, bytes);
@@ -1293,7 +1341,7 @@ function resultDialog(out: ExportOutcome) {
     modal(`<div class="big-icon bad">${ICON_BAD}</div><h2>Not saved, to keep you safe</h2>
       <p class="hint">The final check found something that might reveal hidden content, so Umbra didn't save it. Try again with a higher quality, or draw slightly larger boxes.</p>
       <details ${prefs.advanced ? 'open' : ''}><summary>Details</summary>${technicalReport(out)}</details>
-      <div class="row"><button id="r-close">Close</button></div>`);
+      <div class="row"><button id="r-close">Close</button></div>`, true);
     $('#r-close').onclick = closeModal;
   }
 }
@@ -1303,6 +1351,23 @@ $('#btn-close').onclick = () => { if (S.busy) return; if (S.panel) closePanel();
 $('#btn-open-2').onclick = pickAndLoad;
 $('#mode-draw').onclick = () => { S.mode = 'draw'; syncToolbar(); };
 $('#mode-pan').onclick = () => { S.mode = 'pan'; syncToolbar(); };
+// A horizontal swipe on the mode toggle switches mode (right: Redact, left: Scroll).
+{
+  let x0: number | null = null;
+  const seg = $('#mode-seg');
+  seg.addEventListener('pointerdown', (e) => { x0 = e.clientX; });
+  seg.addEventListener('pointerup', (e) => {
+    if (x0 === null) return;
+    const dx = e.clientX - x0; x0 = null;
+    if (Math.abs(dx) < 24) return;
+    const m = dx > 0 ? 'draw' : 'pan';
+    if (m !== S.mode) { S.mode = m; syncToolbar(); }
+    seg.dataset.swiped = '1'; // the click that follows the swipe mustn't switch it back
+    setTimeout(() => delete seg.dataset.swiped, 0);
+  });
+  seg.addEventListener('pointercancel', () => { x0 = null; });
+  seg.addEventListener('click', (e) => { if (seg.dataset.swiped) e.stopPropagation(); }, true);
+}
 $('#btn-undo').onclick = undo;
 $('#btn-redo').onclick = redo;
 $('#btn-reset').onclick = resetAll;
@@ -1399,5 +1464,9 @@ syncToolbar();
   canRedo: () => S.redo.length > 0,
   reset: () => { resetAll(); ($('#rs-yes') as HTMLButtonElement | null)?.click(); },
   back: () => handleBack(),
+  showResult: async () => { resultDialog(await runExport({ ...DEFAULT_EXPORT }, false, () => {})); },
+  startDetect: (enabled: string[]) => { if (S.panel !== 'detect') openDetect(); (window as unknown as { __scan: Promise<void> }).__scan = runDetect(enabled, []); },
+  scanning: () => !!S.scan,
+  mode: () => S.mode,
   state: () => ({ hasDoc: !!S.doc, dirty: S.dirty, panel: S.panel, modal: !$('#modal').hidden && !$('#modal').classList.contains('closing') }),
 };

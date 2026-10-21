@@ -34,11 +34,13 @@ export interface ExtractOptions {
   ocr: 'auto' | 'never' | 'always';
   ocrDpi: number;
   onStatus?: (s: string) => void;
+  /** A scanned page already read elsewhere (the native scan): words in px at `scale`, or null to read it here. */
+  preread?: (index: number) => Promise<{ words: OcrWord[]; scale: number } | null>;
 }
 const DEFAULT_EXTRACT: ExtractOptions = { ocr: 'auto', ocrDpi: 0 };
 /** Page render resolution for OCR when not set: PaddleOCR reads well at 220 DPI (less to render and move), Tesseract wants 300. */
-const defaultOcrDpi = () => (getOcrEngine() === 'paddle' ? Number((globalThis as { __umbraOcrDpi?: number }).__umbraOcrDpi) || 220 : 300);
-const MIN_TEXT_CHARS = 8;        // fewer non-space chars than this => treat page as scanned
+export const defaultOcrDpi = () => (getOcrEngine() === 'paddle' ? Number((globalThis as { __umbraOcrDpi?: number }).__umbraOcrDpi) || 220 : 300);
+export const MIN_TEXT_CHARS = 8;        // fewer non-space chars than this => treat page as scanned
 const OCR_MAX_PIXELS = 16_000_000;
 
 // ---------- builder ----------
@@ -167,7 +169,7 @@ function pushWords(b: Builder, words: OcrWord[], scale: number, off = { x: 0, y:
   }
 }
 
-function ocrScale(page: PDFPageProxy, dpi: number): number {
+export function ocrScale(page: PDFPageProxy, dpi: number): number {
   const base = page.getViewport({ scale: 1 });
   let scale = dpi / 72;
   const px = base.width * base.height * scale * scale;
@@ -175,10 +177,15 @@ function ocrScale(page: PDFPageProxy, dpi: number): number {
   return scale;
 }
 
-async function ocrLayer(page: PDFPageProxy, index: number, dpi: number, onStatus: (s: string) => void): Promise<PageText> {
+async function ocrLayer(page: PDFPageProxy, index: number, dpi: number, onStatus: (s: string) => void, preread?: ExtractOptions['preread']): Promise<PageText> {
+  const b = new Builder();
+  const pre = await preread?.(index);
+  if (pre) {
+    pushWords(b, pre.words, pre.scale);
+    return { page: index, text: b.text, boxes: b.boxes, groups: b.groups, source: 'ocr' };
+  }
   const scale = ocrScale(page, dpi);
   const canvas = document.createElement('canvas');
-  const b = new Builder();
   try {
     const tr = performance.now();
     await renderToCanvas(page, canvas, scale);
@@ -287,7 +294,7 @@ export async function extractPageText(doc: PDFDocumentProxy, index: number, opts
     if (o.ocr === 'never') return t;
     if (t.text.replace(/\s/g, '').length >= MIN_TEXT_CHARS) return addImageText(page, t, o.ocrDpi, o.onStatus ?? (() => {}));
   }
-  return ocrLayer(page, index, o.ocrDpi, o.onStatus ?? (() => {}));
+  return ocrLayer(page, index, o.ocrDpi, o.onStatus ?? (() => {}), o.preread);
 }
 
 /** Per-document cache so search and detection reuse text extraction and OCR. */
@@ -379,16 +386,34 @@ function dedupe(hits: Hit[]): Hit[] {
 }
 const mergeLabel = (a: string, b: string) => (a.split(' / ').includes(b) ? a : `${a} / ${b}`);
 
+/** The error a stopped scan ends with. */
+export const isAbort = (e: unknown): boolean => (e as Error | null)?.name === 'AbortError';
+
+/**
+ * Wait for p unless the signal stops the wait first (then reject with an AbortError). The work behind p
+ * isn't stopped: a page being read finishes and stays cached.
+ */
+export function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(new DOMException('Stopped', 'AbortError'));
+  return new Promise<T>((res, rej) => {
+    const stop = () => rej(new DOMException('Stopped', 'AbortError'));
+    signal.addEventListener('abort', stop, { once: true });
+    p.then(res, rej).finally(() => signal.removeEventListener('abort', stop));
+  });
+}
+
 /** Run patterns over every page (OCR-ing scanned pages as needed). */
 export async function searchDocument(
   cache: PageTextCache, patterns: SearchPattern[],
   onProgress: (msg: string, fraction: number) => void = () => {},
+  signal?: AbortSignal,
 ): Promise<Hit[]> {
   const n = cache.doc.numPages;
   const all: Hit[] = [];
   for (let i = 0; i < n; i++) {
     onProgress(`Reading page ${i + 1}/${n}`, i / n);
-    const pt = await cache.get(i, (s) => onProgress(`Page ${i + 1}/${n}: ${s}`, i / n));
+    const pt = await abortable(cache.get(i, (s) => onProgress(`Page ${i + 1}/${n}: ${s}`, i / n)), signal);
     const hits: Hit[] = [];
     for (const p of patterns) for (const m of findInPage(pt, p)) hits.push({ ...m, label: p.label, patternId: p.id });
     all.push(...dedupe(hits));

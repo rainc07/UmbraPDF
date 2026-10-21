@@ -104,7 +104,9 @@ body:not(.has-doc) .zoom { opacity: 0; pointer-events: none; transform: translat
 
 /* ---------- Dock ---------- */
 .dock {
-  display: flex; align-items: stretch; gap: 4px; margin: 0 6px; padding: 8px 8px calc(var(--sab) + 8px);
+  /* Two groups: [Scroll | Redact] at the left edge, [Undo | Redo | Reset] at the right; every button the same size. */
+  --tw: 62px;
+  display: flex; align-items: stretch; justify-content: space-between; gap: 4px; margin: 0 6px; padding: 8px 8px calc(var(--sab) + 8px);
   background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -6px 20px rgba(0, 0, 0, .06);
   transition: transform .28s cubic-bezier(.2, .8, .2, 1), opacity .2s;
 }
@@ -116,10 +118,12 @@ body:not(.has-doc) .dock { display: none; }
 }
 .tool .ico { width: 22px; height: 22px; }
 .tool span { white-space: nowrap; }
-.dock > .tool { flex: 1; }
-.seg .tool { width: 62px; flex: none; }
+.dock .seg { flex: none; }
+.dock .tool { width: var(--tw); flex: none; }
 .tool.on { background: var(--surface); color: var(--accent-text); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
-.dock > .tool.on { background: var(--accent-soft); box-shadow: none; }
+/* Undo / Redo / Reset are actions, not modes: press feedback only. */
+.dock .acts .tool:active:not(:disabled) { background: var(--surface); color: var(--accent-text); transform: scale(.94); }
+#mode-seg { touch-action: pan-y; }
 .tool.primary { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 
 /* ---------- Bottom panel (Find / Detect) ---------- */
@@ -291,7 +295,7 @@ progress { width: 100%; accent-color: var(--accent); height: 8px; }
   .appbar .pill span { display: none; }
   .appbar .pill { width: 40px; padding: 0; }
   .tool { font-size: .66rem; }
-  .seg .tool { width: 52px; }
+  .dock { --tw: 54px; }
   .grid { grid-template-columns: 1fr 1fr; }
   .tile { padding: 9px 30px 9px 10px; min-height: 58px; }
   #panel .one { padding: 3px 8px; }
@@ -347,6 +351,7 @@ body.has-doc .docname { text-align: left; color: var(--text); font-weight: 500; 
 }
 @media (max-width: 380px) { .act.primary span { display: none; } .act.primary { width: 42px; padding: 0; } }
 button.primary.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+#p-stop { display: block; margin: 6px 0 4px; color: var(--danger); }
 
 /* Start screen: content centred, never scrolls */
 body:not(.has-doc) #viewer { overflow: hidden; padding: 0; display: grid; place-items: center; }
@@ -364,7 +369,8 @@ body:not(.has-doc) #empty { margin: 0 auto; }
   .appbar .round { width: 36px; }
   .dock { padding-top: 4px; padding-bottom: calc(var(--sab) + 4px); }
   .tool, .dock .tool { flex-direction: row; min-height: 38px; padding: 4px 8px; justify-content: center; gap: 6px; font-size: .8rem; }
-  .dock .seg .tool { width: auto; padding: 4px 12px; }
+  .dock { --tw: 88px; }
+  .dock .seg .tool { padding: 4px 8px; }
   .tool .ico { width: 20px; height: 20px; }
   #viewer { padding-bottom: 72px; left: var(--side-l, 0px); right: var(--side-r, 0px); transition: left .3s, right .3s; }
   .zoom { bottom: 16px; right: calc(var(--side-r, 0px) + 16px); }

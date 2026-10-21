@@ -37,7 +37,7 @@ function spawn(): Engine {
 // ---------- native engine (Android: window.UmbraOcr, see PpOcr.kt) ----------
 interface NativePort { postMessage(m: string | ArrayBuffer): void; onmessage: ((e: { data: string }) => void) | null }
 type NativeReply = { id: number; ok: boolean; error?: string; lines?: PpLine[]; load?: number; threads?: number;
-  ms?: { load: number; decode?: number; det: number; rec: number; retry: number; lines: number; threads: number; flipped: boolean } };
+  ms?: { load: number; det: number; rec: number; retry: number; lines: number; threads: number; flipped: boolean } };
 let native: { port: NativePort; binary: boolean } | null = null;
 let nativeOff = false;
 const nativePending = new Map<number, (r: NativeReply) => void>();
@@ -55,30 +55,26 @@ function nativeCaps(): { port: NativePort; binary: boolean } | null {
 function nativeCall(msg: string | ArrayBuffer, id: number): Promise<NativeReply> {
   return new Promise((res) => { nativePending.set(id, res); native!.port.postMessage(msg); });
 }
-function b64(u8: Uint8Array | Uint8ClampedArray): string {
+function b64(u8: Uint8ClampedArray): string {
   let s = '';
   for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
   return btoa(s);
 }
 async function nativeReadLines(c: HTMLCanvasElement, limit: number): Promise<PpLine[]> {
   const t0 = performance.now();
-  // Sent as JPEG (about 1 MB instead of ~19 MB of raw pixels for a page): crossing from the page to the
-  // app is a copy between processes, so less data is much faster. Quality 0.92 doesn't change OCR results.
-  const jpeg = new Uint8Array(await (await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('encode failed'))), 'image/jpeg', 0.92))).arrayBuffer());
+  const img = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, c.width, c.height);
   const id = ++seq;
   let msg: string | ArrayBuffer;
   if (native!.binary) {
-    const buf = new ArrayBuffer(16 + jpeg.length);
-    new Int32Array(buf, 0, 4).set([id, -1, -1, limit]);
-    new Uint8Array(buf, 16).set(jpeg);
+    const buf = new ArrayBuffer(16 + img.data.length);
+    new Int32Array(buf, 0, 4).set([id, c.width, c.height, limit]);
+    new Uint8Array(buf, 16).set(img.data);
     msg = buf;
-  } else msg = JSON.stringify({ id, w: -1, h: -1, limit, b64: b64(jpeg) });
-  const t1 = performance.now();
+  } else msg = JSON.stringify({ id, w: c.width, h: c.height, limit, b64: b64(img.data) });
   const r = await nativeCall(msg, id);
   if (!r.ok) throw new Error(r.error);
   const m = r.ms!;
-  const total = performance.now() - t0;
-  ppStats.log.push(`${c.width}x${c.height} (det ${limit}, native ${m.threads} threads): ${Math.round(total)} ms = encode ${Math.round(t1 - t0)} + decode ${m.decode ?? 0} + det ${m.det} + rec ${m.rec} (${m.lines} lines) + retry ${m.retry}${m.flipped ? ', upside down' : ''} + transfer ${Math.max(0, Math.round(total - (t1 - t0) - (m.decode ?? 0) - m.det - m.rec - m.retry))}`);
+  ppStats.log.push(`${c.width}x${c.height} (det ${limit}, native ${m.threads} threads): ${Math.round(performance.now() - t0)} ms = det ${m.det} + rec ${m.rec} (${m.lines} lines) + retry ${m.retry}${m.flipped ? ', upside down' : ''}`);
   return r.lines!;
 }
 
@@ -242,29 +238,18 @@ const cardSize = (q: Quad): [number, number] => {
 const CARD_WORD = /^(?:KAD|PENGENALAN|MALAYSIA|WARGANEGARA|IDENTITY|PENDUDUK|KETUA|PENGARAH|PENDAFTARAN|MYKAD|MYPR|MYKID|MYKAS)$/i;
 const PAGE_LIMIT = 1600;
 /** Text detection on a card runs at this width (card text is large); recognition still uses the full-size copy. */
-const CARD_DET_LIMIT = 960;
+const CARD_DET_LIMIT = 640;
 
 /**
- * Read a page (or a picture) with PaddleOCR: one read of the whole page (detection on a reduced copy,
- * recognition on full pixels). ID cards are then picked out of that reading:
- * - card-like regions (found by shape, ink, or islands of print) whose lines show card wording or an IC
- *   number are cards; their lines get card handling (capitals, upside-down fix, unread-IC placeholder);
- * - a tilted or skewed card, or a card-shaped region that read poorly (upside down, glare), is read
- *   again warped upright, and that reading replaces the page's lines inside it.
- * Pages with confident text and no card wording skip the card search entirely.
- * `onCardWords` post-processes a card's words in the card's upright frame (W×H) before mapping.
+ * Read a page (or a picture) with PaddleOCR. Cards are found first (no OCR) and each is read upright at its
+ * own size; the rest of the page is read once with the cards blanked out. Returns canvas-pixel words.
+ * `onCardWords` lets the caller post-process a card's words in the card's upright frame (W×H) before mapping.
  */
 export async function ppocrPage(
   canvas: HTMLCanvasElement,
   onCardWords: (words: OcrWord[], W: number, H: number) => OcrWord[] = (w) => w,
 ): Promise<OcrWord[]> {
   const W = canvas.width, H = canvas.height;
-  let lines = await readLines(canvas, PAGE_LIMIT);
-  const centreOf = (l: PpLine): P => [(l.quad[0][0] + l.quad[2][0]) / 2, (l.quad[0][1] + l.quad[2][1]) / 2];
-  const cardish = (ls: PpLine[]) => ls.some((l) => l.text.split(/\s+/).some((t) => CARD_WORD.test(t.replace(/[^\p{L}]/gu, '')))) || ls.some((l) => /\d{6}\s?-?\s?\d{2}\s?-?\s?\d{4}/.test(l.text));
-  const meanConf = (ls: PpLine[]) => (ls.length ? ls.reduce((a, l) => a + l.conf, 0) / ls.length : 0);
-  if (!cardish(lines) && lines.length >= 15 && meanConf(lines) >= 0.85) return linesToWords(lines);
-
   const centre = (q: Quad): P => [q.reduce((s, p) => s + p[0], 0) / 4, q.reduce((s, p) => s + p[1], 0) / 4];
   const rect = (q: Quad) => box(q as P[]);
   const area = (q: Quad) => { const r = rect(q); return (r.x1 - r.x0) * (r.y1 - r.y0); };
@@ -274,7 +259,8 @@ export async function ppocrPage(
   let islands = contentGroups(canvas);
   shapes = shapes.filter((c) => !islands.some((q) => overlaps(c, q) && area(q) > 1.5 * area(c)));
   islands = islands.filter((q) => !shapes.some((c) => overlaps(c, q)));
-  // An island is the card's print, not the card: widen it to card proportions (blank margins, a faint header).
+  // An island is the card's print, not the card: widen it to card proportions (blank margins, a faint
+  // header) so the whole card is read and blanked from the rest of the page.
   islands = islands.map((q) => {
     const r = rect(q);
     let x0 = r.x0, y0 = r.y0, x1 = r.x1, y1 = r.y1;
@@ -284,64 +270,134 @@ export async function ppocrPage(
     x0 = Math.max(0, x0 - mx); y0 = Math.max(0, y0 - my); x1 = Math.min(W, x1 + mx); y1 = Math.min(H, y1 + my);
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] as Quad;
   });
-  const cands = [...shapes.map((q) => ({ q, shape: true })), ...islands.map((q) => ({ q, shape: false }))];
-  ppStats.log.push(`locate: ${Math.round(performance.now() - t0)} ms, ${cands.length} card-like region(s)`);
+  const quads = [...shapes, ...islands];
+  ppStats.log.push(`locate: ${Math.round(performance.now() - t0)} ms, ${quads.length} card-like region(s)`);
 
-  const upright = (q: Quad) => {
-    const a = Math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0]), b = Math.atan2(q[2][1] - q[3][1], q[2][0] - q[3][0]);
-    return Math.abs(a) < 0.05 && Math.abs(b) < 0.05 && Math.abs(q[0][0] - q[3][0]) < 0.05 * (q[1][0] - q[0][0]);
-  };
-  /** Card lines in the card's own frame (cw×ch) -> words: upside-down fix, capitals, unread-IC placeholder; to page. */
-  const asCard = (ls0: PpLine[], q: Quad, cw: number, ch: number): OcrWord[] => {
-    let qq = q, ls = ls0;
-    const upside = ls0.filter((l) => l.quad[0][1] > l.quad[3][1]).length;
-    if (ls0.length && upside > ls0.length / 2) {
-      qq = turnQuad(q, 2);
-      ls = ls0.map((l) => ({ ...l, quad: l.quad.map(([x, y]) => [cw - x, ch - y] as P) }));
+  const restRead = (async () => {
+  const words: OcrWord[] = [];
+  // The rest of the page, with candidate cards blanked, cropped to what is still printed. Skipped for a
+  // photo of a card (the card fills much of the frame; the rest is background).
+  const cardArea = quads.reduce((s, q) => s + area(q), 0);
+  if (!quads.length || cardArea < 0.35 * W * H) {
+    let src = canvas;
+    if (quads.length) {
+      src = document.createElement('canvas'); src.width = W; src.height = H;
+      const g = src.getContext('2d')!;
+      g.drawImage(canvas, 0, 0); g.fillStyle = '#fff';
+      for (const q of quads) {
+        const [cx, cy] = centre(q);
+        g.beginPath(); q.forEach(([x, y], i) => { const px = cx + (x - cx) * 1.06, py = cy + (y - cy) * 1.06; if (i) g.lineTo(px, py); else g.moveTo(px, py); }); g.closePath(); g.fill();
+      }
     }
-    // MyKad-family cards are printed in capitals; a mixed-case reading is the OCR's guess.
-    let ws = linesToWords(ls).map((w) => ({ ...w, text: w.text.toUpperCase(), symbols: w.symbols.map((s) => ({ ...s, text: s.text.toUpperCase() })) }));
-    ws = onCardWords(ws, cw, ch);
-    return mapToPage(ws, qq, cw, ch);
-  };
-
-  const used = new Set<PpLine>();
-  const cardWords: OcrWord[][] = [];
-  for (const { q, shape } of cands) {
-    const inside = lines.filter((l) => !used.has(l) && inQuad(q, ...centreOf(l)));
-    const isCard = cardish(inside);
-    const poor = shape && (inside.length < 3 || meanConf(inside) < 0.8);
-    if (!isCard && !poor) continue; // ordinary text: the page reading stands
-    if (isCard && upright(q)) {
-      // Upright card (scanner apps): its lines from the page reading, in the card's frame.
-      const r = rect(q), x0 = r.x0, y0 = r.y0, cw = r.x1 - r.x0, ch = r.y1 - r.y0;
-      const local = inside.map((l) => ({ ...l, quad: l.quad.map(([x, y]) => [x - x0, y - y0] as P) }));
-      inside.forEach((l) => used.add(l));
-      cardWords.push(asCard(local, [[x0, y0], [x0 + cw, y0], [x0 + cw, y0 + ch], [x0, y0 + ch]], cw, ch));
-      continue;
+    // Each remaining block of print is read on its own (detection cost follows the area actually printed).
+    for (const ink of inkIslands(src)) {
+      const part = document.createElement('canvas');
+      part.width = ink.w; part.height = ink.h;
+      part.getContext('2d')!.drawImage(src, ink.x0, ink.y0, ink.w, ink.h, 0, 0, ink.w, ink.h);
+      try {
+        const lines = await readLines(part, Math.min(PAGE_LIMIT, Math.max(ink.w, ink.h)));
+        const sh = (b: { x0: number; y0: number; x1: number; y1: number }) => ({ x0: b.x0 + ink.x0, y0: b.y0 + ink.y0, x1: b.x1 + ink.x0, y1: b.y1 + ink.y0 });
+        const base = words.length ? Math.max(...words.map((w) => w.line)) + 1 : 0;
+        words.push(...linesToWords(lines).map((w) => ({ ...w, ...sh(w), line: base + w.line, symbols: w.symbols.map((s) => ({ ...s, ...sh(s) })) })));
+      } finally { part.width = part.height = 0; }
     }
-    // Tilted, skewed, or read poorly: read it again warped upright.
-    const [cw, ch] = cardSize(q);
-    const crop = warpQuad(canvas, q, cw, ch);
-    let again: PpLine[];
-    try { again = await readLines(crop, CARD_DET_LIMIT); } finally { crop.width = crop.height = 0; }
-    if (!cardish(again) && !isCard) continue; // not a card after all
-    inside.forEach((l) => used.add(l));
-    cardWords.push(asCard(again, q, cw, ch));
+    if (src !== canvas) src.width = src.height = 0;
   }
-  lines = lines.filter((l) => !used.has(l));
-  const words = linesToWords(lines);
+  return words;
+  })();
+
+  // Cards are read concurrently: detection queues on the first engine while others recognise.
+  const cardReads = quads.map(async (q) => {
+    const [cw, ch] = cardSize(q);
+    const tw = performance.now();
+    const crop = warpQuad(canvas, q, cw, ch);
+    ppStats.log.push(`warp card ${cw}x${ch}: ${Math.round(performance.now() - tw)} ms`);
+    let lines: PpLine[];
+    try { lines = await readLines(crop, CARD_DET_LIMIT); } finally { crop.width = crop.height = 0; }
+    let ws = linesToWords(lines);
+    const isCard = cardLike(ws);
+    // Card upside down? Most lines then needed the 180° turn: re-frame so the card's own reading order holds.
+    let qq = q;
+    const upside = lines.filter((l) => l.quad[0][1] > l.quad[3][1]).length;
+    if (lines.length && upside > lines.length / 2) {
+      qq = turnQuad(q, 2);
+      const flip = (l: PpLine): PpLine => ({ ...l, quad: l.quad.map(([x, y]) => [cw - x, ch - y] as P) });
+      ws = linesToWords(lines.map(flip));
+    }
+    if (isCard) {
+      // MyKad-family cards are printed in capitals; a mixed-case reading is the OCR's guess.
+      ws = ws.map((w) => ({ ...w, text: w.text.toUpperCase(), symbols: w.symbols.map((s) => ({ ...s, text: s.text.toUpperCase() })) }));
+      ws = onCardWords(ws, cw, ch);
+    }
+    return mapToPage(ws, qq, cw, ch);
+  });
+  const [restWords, cards] = await Promise.all([restRead, Promise.all(cardReads)]);
+  const words = [...restWords];
   let line = words.length ? Math.max(...words.map((w) => w.line)) + 1 : 0;
-  for (const ws of cardWords) {
+  for (const ws of cards) {
     for (const w of ws) words.push({ ...w, line: line + w.line });
     if (ws.length) line += Math.max(...ws.map((w) => w.line)) + 1;
   }
   return words;
 }
 
+/**
+ * Words of a page read in blocks of print (the native scan, NativeScan.kt): each block's lines become words
+ * on their own, in order, as ppocrPage does for the blocks it reads.
+ */
+export function wordsFromBlocks(blocks: PpLine[][]): OcrWord[] {
+  const words: OcrWord[] = [];
+  for (const lines of blocks) {
+    const base = words.length ? Math.max(...words.map((w) => w.line)) + 1 : 0;
+    words.push(...linesToWords(lines).map((w) => ({ ...w, line: base + w.line })));
+  }
+  return words;
+}
+
+/** ID card wording or an IC number: such a page is read again with the card search (ppocrPage). */
+export const cardLike = (ws: OcrWord[]): boolean =>
+  ws.some((w) => CARD_WORD.test(w.text.replace(/[^\p{L}]/gu, ''))) || ws.some((w) => /\d{6}-?\d{2}-?\d{4}/.test(w.text));
+
 /** Map words from an upright warped copy (cw×ch) of quad q back to the page. */
 function mapToPage(ws: OcrWord[], q: Quad, cw: number, ch: number): OcrWord[] {
   const m = (x: number, y: number): P => at(q as P[], x / cw, y / ch);
   const bb = (b: { x0: number; y0: number; x1: number; y1: number }) => box([m(b.x0, b.y0), m(b.x1, b.y0), m(b.x1, b.y1), m(b.x0, b.y1)]);
   return ws.map((w) => ({ ...w, ...bb(w), symbols: w.symbols.map((s) => ({ ...s, ...bb(s) })) }));
+}
+
+/** Blocks of print (upright boxes with a margin) on a mostly blank page, merged when close; small specks skipped. */
+function inkIslands(c: HTMLCanvasElement): { x0: number; y0: number; w: number; h: number }[] {
+  const S = Math.min(1, 600 / Math.max(c.width, c.height));
+  const w = Math.max(1, Math.round(c.width * S)), h = Math.max(1, Math.round(c.height * S));
+  const sm = document.createElement('canvas');
+  sm.width = w; sm.height = h;
+  const g = sm.getContext('2d', { willReadFrequently: true })!;
+  g.drawImage(c, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  sm.width = sm.height = 0;
+  const R = 6; // join print within ~1% of the page
+  const ink = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) ink[i] = Math.min(d[i * 4], d[i * 4 + 1], d[i * 4 + 2]) < 170 ? 1 : 0;
+  // Dilate by R (separable max) so letters and words of one block connect.
+  const tmp = new Uint8Array(w * h), grown = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = 0; for (let k = Math.max(0, x - R); k <= Math.min(w - 1, x + R) && !v; k++) v = ink[y * w + k]; tmp[y * w + x] = v; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = 0; for (let k = Math.max(0, y - R); k <= Math.min(h - 1, y + R) && !v; k++) v = tmp[k * w + x]; grown[y * w + x] = v; }
+  const label = new Int32Array(w * h), out: { x0: number; y0: number; w: number; h: number }[] = [], stack: number[] = [];
+  let n = 0;
+  for (let s0 = 0; s0 < w * h; s0++) {
+    if (!grown[s0] || label[s0]) continue;
+    n++;
+    let x0 = w, y0 = h, x1 = 0, y1 = 0, cnt = 0;
+    label[s0] = n; stack.push(s0);
+    while (stack.length) {
+      const i = stack.pop()!, x = i % w, y = (i / w) | 0;
+      if (ink[i]) cnt++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) if (j >= 0 && j < w * h && grown[j] && !label[j]) { label[j] = n; stack.push(j); }
+    }
+    if (cnt < 6) continue; // specks
+    const X0 = Math.max(0, x0 / S), Y0 = Math.max(0, y0 / S), X1 = Math.min(c.width, (x1 + 1) / S), Y1 = Math.min(c.height, (y1 + 1) / S);
+    out.push({ x0: Math.floor(X0), y0: Math.floor(Y0), w: Math.ceil(X1 - X0), h: Math.ceil(Y1 - Y0) });
+  }
+  return out;
 }

@@ -1,4 +1,4 @@
-import type { Host, Insets, OpenedFile } from './host';
+import type { Host, Insets, NativeScan, OpenedFile } from './host';
 
 /** Kotlin side: app.umbrapdf.UmbraBridge (@JavascriptInterface). */
 interface AndroidBridge {
@@ -17,6 +17,10 @@ interface AndroidBridge {
   workStart?(title: string): void;
   workProgress?(text: string, pct: number): void;
   workDone?(title: string, text: string): void;
+  scanStart?(token: string, pagesJson: string): boolean;
+  scanTake?(index: number): string;
+  scanCancel?(): void;
+  scanReset?(): void;
 }
 
 /** Kotlin -> JS callbacks (evaluateJavascript). */
@@ -27,6 +31,8 @@ interface HostCallbacks {
   onSystemTheme?(dark: boolean): void;
   /** Called by Kotlin on Back; return value comes back through evaluateJavascript. */
   onBack?(): boolean;
+  /** A page of the native scan was read. */
+  onScanPage?(index: number): void;
 }
 
 declare global {
@@ -52,18 +58,33 @@ export function createAndroidHost(): Host | null {
   let themeCb: ((dark: boolean) => void) | null = null;
   let backCb: (() => boolean) | null = null;
   let lastProgress = 0;
+  // The open document's staged file stays with Kotlin while it's open, so the native scan can read it.
+  let docToken: string | null = null;
+  let scanCb: ((i: number) => void) | null = null;
+  const dropDoc = () => {
+    if (!docToken) return;
+    try { bridge.scanReset?.(); } catch { /* ignore */ }
+    bridge.release(docToken);
+    docToken = null;
+  };
   const parseInsets = (json: string): Insets | null => {
     try { const v = JSON.parse(json) as Insets; return typeof v.top === 'number' ? v : null; } catch { return null; }
   };
 
-  /** Kotlin serves picked file bytes at a same-origin URL; fetch then release. */
+  /**
+   * Kotlin serves picked file bytes at a same-origin URL. The file stays staged while it's the open document
+   * (the native scan reads it); without native scanning it's released at once.
+   */
   async function load(msg: { url: string; name: string; token: string }): Promise<OpenedFile> {
+    let keep = false;
     try {
       const r = await fetch(msg.url);
       if (!r.ok) throw new Error(`Read failed (${r.status})`);
-      return { name: msg.name, bytes: new Uint8Array(await r.arrayBuffer()) };
+      const file = { name: msg.name, bytes: new Uint8Array(await r.arrayBuffer()) };
+      if (bridge!.scanStart) { dropDoc(); docToken = msg.token; keep = true; }
+      return file;
     } finally {
-      bridge!.release(msg.token);
+      if (!keep) bridge!.release(msg.token);
     }
   }
 
@@ -83,6 +104,19 @@ export function createAndroidHost(): Host | null {
     onInsets: (json) => { const i = parseInsets(json); if (i) insetsCb?.(i); },
     onSystemTheme: (dark) => themeCb?.(dark),
     onBack: () => (backCb ? backCb() : false),
+    onScanPage: (i) => scanCb?.(i),
+  };
+
+  /** Bound to one document: once another is opened (or it's closed), its pages read as failed (the page reads them). */
+  const scanFor = (token: string): NativeScan => {
+    const gone = () => docToken !== token;
+    return {
+      start: (pages) => { try { return !gone() && !!bridge.scanStart?.(token, JSON.stringify(pages)); } catch { return false; } },
+      take: (i) => { if (gone()) return '{"ok":false,"error":"closed"}'; try { return bridge.scanTake?.(i) ?? ''; } catch { return ''; } },
+      cancel: () => { if (!gone()) try { bridge.scanCancel?.(); } catch { /* ignore */ } },
+      reset: () => { if (!gone()) try { bridge.scanReset?.(); } catch { /* ignore */ } },
+      onPage: (cb) => { scanCb = cb; },
+    };
   };
 
   return {
@@ -114,6 +148,8 @@ export function createAndroidHost(): Host | null {
       try { bridge.workProgress?.(text, Math.round(Math.max(0, Math.min(1, f)) * 100)); } catch { /* ignore */ }
     },
     workDone: (title, text) => { try { bridge.workDone?.(title, text); } catch { /* ignore */ } },
+    nativeScan: () => (docToken && bridge.scanStart ? scanFor(docToken) : null),
+    closeFile: dropDoc,
     onInsets: (cb) => {
       insetsCb = cb;
       try { const i = bridge.insets ? parseInsets(bridge.insets()) : null; if (i) cb(i); } catch { /* ignore */ }

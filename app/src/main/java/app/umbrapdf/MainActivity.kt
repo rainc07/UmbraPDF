@@ -22,6 +22,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import org.json.JSONArray
 import org.json.JSONObject
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewAssetLoader
@@ -32,6 +33,7 @@ import java.io.ByteArrayInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
+import kotlin.math.max
 
 /**
  * Thin shell: one WebView hosting the bundled web core. No network, no file:// access.
@@ -102,6 +104,7 @@ class MainActivity : ComponentActivity() {
         ocr = PpOcr { n -> assets.open("web/vendor/ppocr/$n").use { it.readBytes() } }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
         nativeOcrBinary = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)
+        scan = NativeScan(ocr, ocrExec, scanEvents)
         WebViewCompat.addWebMessageListener(web, "UmbraOcr", setOf("https://$HOST")) { _, message, _, isMainFrame, reply ->
             if (!isMainFrame) return@addWebMessageListener
             val bin = if (nativeOcrBinary && message.type == WebMessageCompat.TYPE_ARRAY_BUFFER) message.arrayBuffer else null
@@ -125,11 +128,8 @@ class MainActivity : ComponentActivity() {
                 val h = ByteBuffer.wrap(bin, 0, 16).order(ByteOrder.LITTLE_ENDIAN)
                 id = h.int
                 val w = h.int; val hh = h.int; val limit = h.int
-                if (w == -1) decodeAndRun(id, limit, bin, 16, bin.size - 16)
-                else {
-                    require(bin.size >= 16 + w * hh * 4) { "short image" }
-                    ocr.run(id, w, hh, limit, bin, 16)
-                }
+                require(bin.size >= 16 + w * hh * 4) { "short image" }
+                ocr.run(id, w, hh, limit, bin, 16)
             } else {
                 val j = JSONObject(str ?: "{}")
                 id = j.optInt("id")
@@ -138,8 +138,7 @@ class MainActivity : ComponentActivity() {
                     JSONObject().put("id", id).put("ok", true).put("load", ms).put("threads", ocr.threads).toString()
                 } else {
                     val px = android.util.Base64.decode(j.getString("b64"), android.util.Base64.DEFAULT)
-                    if (j.getInt("w") == -1) decodeAndRun(id, j.getInt("limit"), px, 0, px.size)
-                    else ocr.run(id, j.getInt("w"), j.getInt("h"), j.getInt("limit"), px, 0)
+                    ocr.run(id, j.getInt("w"), j.getInt("h"), j.getInt("limit"), px, 0)
                 }
             }
         } catch (e: Throwable) {
@@ -147,46 +146,85 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** JPEG (or PNG) page image -> RGBA -> OCR. The reply's "ms" gets the decode time. */
-    private fun decodeAndRun(id: Int, limit: Int, data: ByteArray, off: Int, len: Int): String {
-        val t0 = System.nanoTime()
-        val bmp = android.graphics.BitmapFactory.decodeByteArray(data, off, len) ?: error("image decode failed")
-        val w = bmp.width; val h = bmp.height
-        val argb = IntArray(w * h)
-        bmp.getPixels(argb, 0, w, 0, 0, w, h)
-        bmp.recycle()
-        val px = ByteArray(w * h * 4)
-        for (i in argb.indices) {
-            val c = argb[i]; val o = i * 4
-            px[o] = (c shr 16).toByte(); px[o + 1] = (c shr 8).toByte(); px[o + 2] = c.toByte(); px[o + 3] = -1
+    // ---- Native scan of scanned pages (keeps going in the background; see NativeScan) ----
+    private var scan: NativeScan? = null
+    private var scanning = false
+
+    private val scanEvents = object : NativeScan.Events {
+        override fun onPage(index: Int, done: Int, total: Int) = runOnUiThread {
+            bridge.callJs("onScanPage", index.toString())
+            if (scanning) WorkService.progress(this@MainActivity, if (jsWork) workTitle else getString(R.string.scan_title),
+                getString(R.string.scan_progress, done, total), done * 100 / max(1, total))
         }
-        val decodeMs = (System.nanoTime() - t0) / 1_000_000
-        return ocr.run(id, w, h, limit, px, 0).replaceFirst("\"ms\":{", "\"ms\":{\"decode\":$decodeMs,")
+        override fun onFinished(cancelled: Boolean) = runOnUiThread {
+            if (!scanning) return@runOnUiThread
+            scanning = false
+            if (!jsWork) { WorkService.stop(this@MainActivity); return@runOnUiThread }
+            if (cancelled) return@runOnUiThread
+            // The page's scan finishes within moments and reports itself, unless Android froze the page in the
+            // background: then it finishes once the app is shown again, so say now that it's ready.
+            web.postDelayed({
+                if (jsWork && !scanning && !visible) {
+                    jsWork = false
+                    WorkService.stop(this@MainActivity)
+                    WorkService.done(this@MainActivity, getString(R.string.scan_done_title), getString(R.string.scan_done_text))
+                }
+            }, 5000)
+        }
     }
+
+    /** pagesJson: [{i, w, h, pw, ph}] (page index, bitmap px, page size in points). False: the page reads them itself. */
+    fun scanStart(token: String, pagesJson: String): Boolean {
+        val s = scan ?: return false
+        val f = store.get(token) ?: return false
+        val a = JSONArray(pagesJson)
+        val pages = (0 until a.length()).map { k ->
+            val o = a.getJSONObject(k)
+            NativeScan.Page(o.getInt("i"), o.getInt("w"), o.getInt("h"), o.getDouble("pw").toFloat(), o.getDouble("ph").toFloat())
+        }
+        s.start(f, pages)
+        if (s.running) runOnUiThread {
+            // Our own flags, not WorkService.running: a stop just requested may not have reached the service yet.
+            if (!scanning) { scanning = true; if (!jsWork) WorkService.start(this, getString(R.string.scan_title)) }
+        }
+        return true
+    }
+
+    fun scanTake(index: Int): String = scan?.take(index) ?: ""
+    fun scanCancel() { scan?.cancel() }
+    fun scanReset() { scan?.reset(); runOnUiThread { if (scanning) { scanning = false; if (!jsWork) WorkService.stop(this) } } }
 
     // ---- Background work + notifications ----
     @Volatile var visible = false
         private set
     private var workTitle = ""
+    private var jsWork = false
+
+    /** Asked once, at first launch (API 33+): background work and "ready" notifications need it. */
+    private fun askNotificationPermissionOnce() {
+        val p = getSharedPreferences("umbra", MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= 33 && !p.getBoolean("askedNotify", false) &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            p.edit().putBoolean("askedNotify", true).apply()
+            askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     fun workStart(title: String) {
         workTitle = title
+        jsWork = true
         WorkService.clearDone(this)
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
-            !getSharedPreferences("umbra", MODE_PRIVATE).getBoolean("askedNotify", false)
-        ) {
-            getSharedPreferences("umbra", MODE_PRIVATE).edit().putBoolean("askedNotify", true).apply()
-            askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-        }
-        WorkService.start(this, title)
+        if (scanning) WorkService.progress(this, title, "", -1) else WorkService.start(this, title)
     }
 
-    fun workProgress(text: String, pct: Int) = WorkService.progress(this, workTitle, text, pct)
+    fun workProgress(text: String, pct: Int) { if (jsWork) WorkService.progress(this, workTitle, text, pct) }
 
     fun workDone(title: String, text: String) {
-        WorkService.stop(this)
-        if (!visible) WorkService.done(this, title, text)
+        val was = jsWork
+        jsWork = false
+        if (!scanning) WorkService.stop(this)
+        if (was && !visible) WorkService.done(this, title, text)
     }
 
     override fun onResume() { super.onResume(); visible = true; WorkService.clearDone(this) }
@@ -268,6 +306,7 @@ class MainActivity : ComponentActivity() {
             WorkService.channels(this)
         } catch (e: Throwable) { android.util.Log.e("umbra", "background work setup failed", e) }
         installOcr()
+        askNotificationPermissionOnce()
         // WebView ignores its own padding, so insets go on a container around it.
         val root = FrameLayout(this).apply { addView(web) }
         setContentView(root)
@@ -321,6 +360,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        scan?.reset()
         WorkService.stop(this)
         ocrExec.shutdownNow()
         bridge.shutdown()

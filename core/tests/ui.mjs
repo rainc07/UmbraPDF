@@ -35,6 +35,7 @@ await page.goto(`http://127.0.0.1:${server.address().port}/index.html`);
 await page.evaluate(async (a) => { await window.__umbraTest.load(new Uint8Array(a)); }, Array.from(pdf));
 await page.waitForTimeout(400);
 await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 }); // splash covers the app at start
+check(await page.evaluate(() => window.__umbraTest.mode()) === 'pan', 'a document opens in Scroll mode');
 const cdp = await ctx.newCDPSession(page);
 const touch = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], id) => ({ x, y, id })) });
 const T = (fn, ...a) => page.evaluate(([f, a]) => window.__umbraTest[f](...a), [fn, a]);
@@ -167,6 +168,72 @@ check((await T('zoom')) > zw0 * 1.3, `Ctrl+wheel zooms in (${zw0.toFixed(3)} →
   check(L.left.panelLeft && L.left.viewerStarts, 'landscape: panel moves to the left side');
   await page.setViewportSize({ width: 412, height: 860 });
   await page.waitForTimeout(300);
+}
+
+// Bottom dock: [Scroll | Redact] at the left edge, [Undo | Redo | Reset] at the right, every button the same size.
+for (const [w, h] of [[412, 860], [360, 780], [915, 412]]) {
+  await page.setViewportSize({ width: w, height: h }); await page.waitForTimeout(250);
+  const L = await page.evaluate(() => {
+    const r = (s) => document.querySelector(s).getBoundingClientRect();
+    const dock = document.querySelector('.dock'), cs = getComputedStyle(dock);
+    const ids = ['#mode-pan', '#mode-draw', '#btn-undo', '#btn-redo', '#btn-reset'];
+    return { widths: ids.map((id) => r(id).width), heights: ids.map((id) => r(id).height), xs: ids.map((id) => r(id).left),
+      left: r('#mode-seg').left - (r('.dock').left + parseFloat(cs.paddingLeft)), right: (r('.dock').right - parseFloat(cs.paddingRight)) - r('.seg.acts').right,
+      rowY: Math.abs(r('#mode-seg').top - r('.seg.acts').top) };
+  });
+  const same = (a) => Math.max(...a) - Math.min(...a) < 0.6;
+  check(same(L.widths) && same(L.heights), `dock ${w}x${h}: all five buttons the same size (${L.widths.map(Math.round)} x ${L.heights.map(Math.round)})`);
+  check(Math.abs(L.left) < 1 && Math.abs(L.right) < 1 && L.rowY < 1, `dock ${w}x${h}: mode toggle at the left edge, Undo/Redo/Reset at the right (${L.left.toFixed(1)}, ${L.right.toFixed(1)})`);
+  check(L.xs.every((x, i) => !i || x > L.xs[i - 1]), `dock ${w}x${h}: order Scroll, Redact, Undo, Redo, Reset`);
+}
+await page.setViewportSize({ width: 412, height: 860 }); await page.waitForTimeout(250);
+{
+  const actsOn = await page.evaluate(() => [...document.querySelectorAll('.dock .acts .tool')].some((b) => b.classList.contains('on') || b.getAttribute('aria-pressed')));
+  check(!actsOn, 'Undo/Redo/Reset have no selected state');
+  await T('setMode', 'pan');
+  const sb = await page.evaluate(() => { const r = document.querySelector('#mode-seg').getBoundingClientRect(); return { x: r.left, y: r.top + r.height / 2, w: r.width }; });
+  const swipe = async (from, to) => { await page.mouse.move(from, sb.y); await page.mouse.down(); await page.mouse.move((from + to) / 2, sb.y); await page.mouse.move(to, sb.y); await page.mouse.up(); await page.waitForTimeout(100); };
+  await swipe(sb.x + 10, sb.x + sb.w - 10);
+  const m1 = await T('mode');
+  await swipe(sb.x + sb.w - 10, sb.x + 10);
+  const m2 = await T('mode');
+  check(m1 === 'draw' && m2 === 'pan', `swiping the mode toggle switches mode (→ ${m1}, ← ${m2})`);
+}
+
+// Stop a scan: Back asks first ("Keep going" carries on), Stop ends it; the panel shows a Stop button meanwhile.
+{
+  const sp = await page.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 1240; c.height = 1754; const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#111'; g.font = '34px serif';
+    for (let i = 0; i < 30; i++) g.fillText(`Line ${i + 1}: Tan Chee Kin, 12 Jalan Ampang, 50450 Kuala Lumpur`, 90, 120 + i * 52);
+    const bl = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+    return Array.from(new Uint8Array(await bl.arrayBuffer()));
+  });
+  const sd = await PDFDocument.create();
+  const img = await sd.embedJpg(Uint8Array.from(sp));
+  for (let i = 0; i < 6; i++) sd.addPage([595, 842]).drawImage(img, { x: 0, y: 0, width: 595, height: 842 });
+  await page.evaluate(async (a) => { await window.__umbraTest.load(new Uint8Array(a)); }, Array.from(await sd.save()));
+  await T('startDetect', ['name', 'address']);
+  await page.waitForTimeout(300);
+  const stopBtn = await page.evaluate(() => !!document.querySelector('#panel #p-stop'));
+  await T('back');
+  const asked = await page.evaluate(() => document.querySelector('#sheet h2')?.textContent);
+  await page.click('#st-no'); await page.waitForTimeout(250);
+  const still = await T('scanning');
+  await T('back'); await page.click('#st-yes');
+  await page.evaluate(() => window.__scan);
+  const after = await page.evaluate(() => ({ scanning: window.__umbraTest.scanning(), status: document.querySelector('#p-status')?.textContent ?? '', stop: !!document.querySelector('#p-stop') }));
+  check(stopBtn && asked === 'Stop auto redaction?', `scan: Stop button shown, Back asks "${asked}"`);
+  check(still, 'scan: "Keep going" carries on');
+  check(!after.scanning && /^Stopped/.test(after.status) && !after.stop, `scan: Stop ends it (${after.status})`);
+}
+
+// Back closes the export result ("Safe to share").
+{
+  await T('showResult');
+  const open = (await T('state')).modal;
+  await T('back'); await page.waitForTimeout(250);
+  check(open && !(await T('state')).modal, 'Back closes the "Safe to share" result');
 }
 
 // Settings saved by 1.0.0 (no TIN detector yet): the new detector starts on, a detector the user turned off stays off.

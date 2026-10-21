@@ -12,7 +12,8 @@ import java.util.concurrent.Executors
 /**
  * JS <-> Kotlin bridge, exposed as window.UmbraAndroid.
  * JS calls in; results go back via window.__umbraHost.onPicked / onSaved.
- * Only file I/O lives here — all PDF processing stays in the web core.
+ * File I/O, settings and background work live here; PDF processing stays in the web core (the native scan
+ * only reads pages' pixels for it).
  */
 class UmbraBridge(private val activity: MainActivity, private val store: LocalFileStore) {
     private val io = Executors.newSingleThreadExecutor()
@@ -108,6 +109,21 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
     /** Work finished: a notification is shown only if the app isn't on screen. Text must not contain document content. */
     @JavascriptInterface
     fun workDone(title: String, text: String) = activity.runOnUiThread { activity.workDone(title.take(80), text.take(160)) }
+
+    /** Read scanned pages natively (keeps going in the background). token: the open document's staged file. */
+    @JavascriptInterface
+    fun scanStart(token: String, pagesJson: String): Boolean = try { activity.scanStart(token, pagesJson) } catch (e: Exception) { false }
+
+    /** A page's native read (JSON), or "" if not read (yet). */
+    @JavascriptInterface
+    fun scanTake(index: Int): String = activity.scanTake(index)
+
+    @JavascriptInterface
+    fun scanCancel() = activity.scanCancel()
+
+    /** Forget the document's pages (closed, or another one opened). */
+    @JavascriptInterface
+    fun scanReset() = activity.scanReset()
 
     // ---- Called from MainActivity ----
 

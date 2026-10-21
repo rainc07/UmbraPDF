@@ -2,4 +2,8 @@
     <string name="app_name">Umbra PDF</string>
     <string name="ch_work">Working in the background</string>
     <string name="ch_done">Ready to review or save</string>
+    <string name="scan_title">Reading scanned pages</string>
+    <string name="scan_progress">Page %1$d of %2$d</string>
+    <string name="scan_done_title">Pages read</string>
+    <string name="scan_done_text">Open Umbra PDF to see the results.</string>
 </resources>
