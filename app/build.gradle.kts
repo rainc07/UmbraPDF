@@ -22,8 +22,8 @@ android {
         applicationId = "app.umbrapdf"
         minSdk = 24
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.1.1"
         // Native OCR libraries: 64-bit ARM phones only (debug builds add x86_64 for the emulator).
         ndk { abiFilters += listOf("arm64-v8a") + (if (project.hasProperty("withX86")) listOf("x86_64") else emptyList()) }
     }

@@ -29,10 +29,10 @@ SHA-256: 39:5B:52:86:9F:CC:17:A9:41:78:E0:2F:5C:D4:3F:91:9D:18:A8:F5:CF:68:EB:76
 ```
 Check before installing (Windows PowerShell; Android SDK build-tools needed for `apksigner`):
 ```powershell
-Get-FileHash UmbraPDF-1.1.0.apk -Algorithm SHA256   # must match the hash in the release notes
-apksigner verify --print-certs UmbraPDF-1.1.0.apk    # "certificate SHA-256 digest" must match the line above
+Get-FileHash UmbraPDF-1.1.1.apk -Algorithm SHA256   # must match the hash in the release notes
+apksigner verify --print-certs UmbraPDF-1.1.1.apk    # "certificate SHA-256 digest" must match the line above
 ```
-On Linux/macOS: `sha256sum UmbraPDF-1.1.0.apk`. If either value differs, don't install it.
+On Linux/macOS: `sha256sum UmbraPDF-1.1.1.apk`. If either value differs, don't install it.
 
 ## Layout
 ```
