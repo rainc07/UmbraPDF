@@ -2,7 +2,7 @@
 // of recognised lines into positioned words with per-character boxes (the shape the rest of the app uses).
 import type { PpRequest, PpResponse } from './ppocr.worker';
 import { readStrips, type PpLine, type PpRec } from './ppocr.pipeline';
-import { findCards, contentGroups, warpQuad, inQuad, turnQuad, CARD_ASPECT, type Quad } from './cards';
+import { findCards, contentGroups, warpQuad, mapBoxBack, inQuad, turnQuad, CARD_ASPECT, type Quad } from './cards';
 import { vendorUrl } from './paths';
 import type { OcrWord } from './ocr';
 
@@ -274,40 +274,47 @@ export async function ppocrPage(
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] as Quad;
   });
   const quads = [...shapes, ...islands];
-  ppStats.log.push(`locate: ${Math.round(performance.now() - t0)} ms, ${quads.length} card-like region(s)`);
+  const qs = (q: Quad) => q.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(' ');
+  ppStats.log.push(`locate: ${Math.round(performance.now() - t0)} ms, ${quads.length} card-like region(s) (edges: ${shapes.map(qs).join('; ') || '-'} | islands: ${islands.map(qs).join('; ') || '-'})`);
 
-  const restRead = (async () => {
-  if (base) return [];
-  const words: OcrWord[] = [];
-  // The rest of the page, with candidate cards blanked, cropped to what is still printed. Skipped for a
-  // photo of a card (the card fills much of the frame; the rest is background).
+  // The page with these regions painted white, a little beyond their edges.
+  const blanked = (regions: Quad[]) => {
+    if (!regions.length) return canvas;
+    const src = document.createElement('canvas'); src.width = W; src.height = H;
+    const g = src.getContext('2d')!;
+    g.drawImage(canvas, 0, 0); g.fillStyle = '#fff';
+    for (const q of regions) {
+      const [cx, cy] = centre(q);
+      g.beginPath(); q.forEach(([x, y], i) => { const px = cx + (x - cx) * 1.06, py = cy + (y - cy) * 1.06; if (i) g.lineTo(px, py); else g.moveTo(px, py); }); g.closePath(); g.fill();
+    }
+    return src;
+  };
+  // Each block of print is read on its own (detection cost follows the area actually printed).
+  type Block = ReturnType<typeof inkIslands>[number] & { words: OcrWord[] };
+  const readBlock = async (src: HTMLCanvasElement, ink: ReturnType<typeof inkIslands>[number]): Promise<Block> => {
+    const part = document.createElement('canvas');
+    part.width = ink.w; part.height = ink.h;
+    part.getContext('2d')!.drawImage(src, ink.x0, ink.y0, ink.w, ink.h, 0, 0, ink.w, ink.h);
+    try {
+      const lines = await readLines(part, Math.min(PAGE_LIMIT, Math.max(ink.w, ink.h)));
+      const sh = (b: { x0: number; y0: number; x1: number; y1: number }) => ({ x0: b.x0 + ink.x0, y0: b.y0 + ink.y0, x1: b.x1 + ink.x0, y1: b.y1 + ink.y0 });
+      return { ...ink, words: linesToWords(lines).map((w) => ({ ...w, ...sh(w), symbols: w.symbols.map((s) => ({ ...s, ...sh(s) })) })) };
+    } finally { part.width = part.height = 0; }
+  };
+  const readBlocks = async (src: HTMLCanvasElement, inks: ReturnType<typeof inkIslands>) => {
+    const out: Block[] = [];
+    for (const ink of inks) out.push(await readBlock(src, ink));
+    return out;
+  };
+
+  // The rest of the page, with candidate cards blanked. Skipped for a photo of a card (the card fills much
+  // of the frame; the rest is background).
   const cardArea = quads.reduce((s, q) => s + area(q), 0);
-  if (!quads.length || cardArea < 0.35 * W * H) {
-    let src = canvas;
-    if (quads.length) {
-      src = document.createElement('canvas'); src.width = W; src.height = H;
-      const g = src.getContext('2d')!;
-      g.drawImage(canvas, 0, 0); g.fillStyle = '#fff';
-      for (const q of quads) {
-        const [cx, cy] = centre(q);
-        g.beginPath(); q.forEach(([x, y], i) => { const px = cx + (x - cx) * 1.06, py = cy + (y - cy) * 1.06; if (i) g.lineTo(px, py); else g.moveTo(px, py); }); g.closePath(); g.fill();
-      }
-    }
-    // Each remaining block of print is read on its own (detection cost follows the area actually printed).
-    for (const ink of inkIslands(src)) {
-      const part = document.createElement('canvas');
-      part.width = ink.w; part.height = ink.h;
-      part.getContext('2d')!.drawImage(src, ink.x0, ink.y0, ink.w, ink.h, 0, 0, ink.w, ink.h);
-      try {
-        const lines = await readLines(part, Math.min(PAGE_LIMIT, Math.max(ink.w, ink.h)));
-        const sh = (b: { x0: number; y0: number; x1: number; y1: number }) => ({ x0: b.x0 + ink.x0, y0: b.y0 + ink.y0, x1: b.x1 + ink.x0, y1: b.y1 + ink.y0 });
-        const base = words.length ? Math.max(...words.map((w) => w.line)) + 1 : 0;
-        words.push(...linesToWords(lines).map((w) => ({ ...w, ...sh(w), line: base + w.line, symbols: w.symbols.map((s) => ({ ...s, ...sh(s) })) })));
-      } finally { part.width = part.height = 0; }
-    }
-    if (src !== canvas) src.width = src.height = 0;
-  }
-  return words;
+  const readRest = !base && (!quads.length || cardArea < 0.35 * W * H);
+  const restRead = (async () => {
+    if (!readRest) return [];
+    const src = blanked(quads);
+    try { return await readBlocks(src, inkIslands(src)); } finally { if (src !== canvas) src.width = src.height = 0; }
   })();
 
   // Cards are read concurrently: detection queues on the first engine while others recognise.
@@ -319,7 +326,8 @@ export async function ppocrPage(
     let lines: PpLine[];
     try { lines = await readLines(crop, CARD_DET_LIMIT); } finally { crop.width = crop.height = 0; }
     let ws = linesToWords(lines);
-    const isCard = cardLike(ws);
+    // Not a card (a block of print, a photo): the plain read of that part of the page stands.
+    if (!cardLike(ws)) return null;
     // Card upside down? Most lines then needed the 180° turn: re-frame so the card's own reading order holds.
     let qq = q;
     const upside = lines.filter((l) => l.quad[0][1] > l.quad[3][1]).length;
@@ -328,19 +336,40 @@ export async function ppocrPage(
       const flip = (l: PpLine): PpLine => ({ ...l, quad: l.quad.map(([x, y]) => [cw - x, ch - y] as P) });
       ws = linesToWords(lines.map(flip));
     }
-    if (base && !isCard) return null; // not a card: the base read of that part of the page stands
-    if (isCard) {
-      // MyKad-family cards are printed in capitals; a mixed-case reading is the OCR's guess.
-      ws = ws.map((w) => ({ ...w, text: w.text.toUpperCase(), symbols: w.symbols.map((s) => ({ ...s, text: s.text.toUpperCase() })) }));
-      ws = onCardWords(ws, cw, ch);
-    }
+    // MyKad-family cards are printed in capitals; a mixed-case reading is the OCR's guess.
+    ws = ws.map((w) => ({ ...w, text: w.text.toUpperCase(), symbols: w.symbols.map((s) => ({ ...s, text: s.text.toUpperCase() })) }));
+    ws = onCardWords(ws, cw, ch);
     return { q, words: mapToPage(ws, qq, cw, ch) };
   });
-  const [restWords, reads] = await Promise.all([restRead, Promise.all(cardReads)]);
+  const [restFirst, reads] = await Promise.all([restRead, Promise.all(cardReads)]);
   const cards = reads.filter((r) => r !== null).map((r) => r.words);
   const cardQuads = reads.filter((r) => r !== null).map((r) => r.q);
+  let rest = restFirst;
+  const notCards = base ? [] : quads.filter((q) => !cardQuads.includes(q));
+  if (notCards.length) {
+    // Candidates that didn't read as cards were blanked from the rest of the page: read the blocks of print
+    // they touch again, plainly (their warped copy skews ordinary text). Blocks away from them keep their read.
+    const src = blanked(cardQuads);
+    try {
+      const zones = notCards.map((q) => { const [cx, cy] = centre(q); return box(q.map(([x, y]) => [cx + (x - cx) * 1.06, cy + (y - cy) * 1.06] as P)); });
+      const touches = (b: { x0: number; y0: number; w: number; h: number }) => zones.some((z) => b.x0 < z.x1 && b.x0 + b.w > z.x0 && b.y0 < z.y1 && b.y0 + b.h > z.y0);
+      const same = (b: { x0: number; y0: number; w: number; h: number }) => restFirst.find((f) => f.x0 === b.x0 && f.y0 === b.y0 && f.w === b.w && f.h === b.h);
+      rest = [];
+      for (const ink of inkIslands(src)) {
+        const kept = touches(ink) ? undefined : same(ink);
+        if (kept) rest.push(kept);
+        else if (touches(ink) || readRest) rest.push(await readBlock(src, ink));
+      }
+      ppStats.log.push(`not cards: ${notCards.length}, re-read ${rest.filter((b) => !restFirst.includes(b)).length} block(s) plainly`);
+    } finally { if (src !== canvas) src.width = src.height = 0; }
+  }
+  const restWords: OcrWord[] = [];
+  for (const b of rest) {
+    const base0 = restWords.length ? Math.max(...restWords.map((w) => w.line)) + 1 : 0;
+    restWords.push(...b.words.map((w) => ({ ...w, line: base0 + w.line })));
+  }
   const outside = (w: OcrWord) => !cardQuads.some((q) => inQuad(q, (w.x0 + w.x1) / 2, (w.y0 + w.y1) / 2));
-  const words = base ? base.filter(outside) : [...restWords];
+  const words = base ? base.filter(outside) : restWords;
   let line = words.length ? Math.max(...words.map((w) => w.line)) + 1 : 0;
   for (const ws of cards) {
     for (const w of ws) words.push({ ...w, line: line + w.line });
@@ -368,9 +397,9 @@ export const cardLike = (ws: OcrWord[]): boolean =>
 
 /** Map words from an upright warped copy (cw×ch) of quad q back to the page. */
 function mapToPage(ws: OcrWord[], q: Quad, cw: number, ch: number): OcrWord[] {
-  const m = (x: number, y: number): P => at(q as P[], x / cw, y / ch);
-  const bb = (b: { x0: number; y0: number; x1: number; y1: number }) => box([m(b.x0, b.y0), m(b.x1, b.y0), m(b.x1, b.y1), m(b.x0, b.y1)]);
-  return ws.map((w) => ({ ...w, ...bb(w), symbols: w.symbols.map((s) => ({ ...s, ...bb(s) })) }));
+  const bb = mapBoxBack(q, cw, ch); // the warp's own homography (a bilinear map drifts on a perspective quad)
+  const m = (b: { x0: number; y0: number; x1: number; y1: number }) => bb(b.x0, b.y0, b.x1, b.y1);
+  return ws.map((w) => ({ ...w, ...m(w), symbols: w.symbols.map((s) => ({ ...s, ...m(s) })) }));
 }
 
 /** Blocks of print (upright boxes with a margin) on a mostly blank page, merged when close; small specks skipped. */

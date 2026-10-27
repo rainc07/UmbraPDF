@@ -354,6 +354,36 @@ check(/Public line stays/.test(p2.scanRaw), `searchable: real spaces between OCR
 check(p2.ok600 && /Public/.test(p2.layer600) && !/850505|ahmad@|H87654321/.test(p2.layer600), `600 DPI searchable export: verified, text layer correct (${p2.ms600} ms)`);
 if (failed) console.log('debug hits:', JSON.stringify({ text: p2.textHits.map((h) => [h.label, h.text]), scan: p2.scanHits.map((h) => [h.label, h.text]) }));
 
+// ---------------- Short block of print on a blank page (once read as a skewed "card") ----------------
+{
+  const BLOCK = ['Name: Tan Chee Kin', 'Address: 12 Jalan Contoh, Kepong', 'The quick brown fox jumps over the lazy dog.', 'Monthly salary: RM 8,500 paid on 25th'];
+  const fx = await page.evaluate(async (lines) => {
+    const c = document.createElement('canvas'); c.width = 1700; c.height = 2200;
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#111';
+    g.font = '44px Arial';
+    const k = 612 / 1700, want = [];
+    lines.forEach((l, i) => {
+      const y = 200 + i * 80; g.fillText(l, 150, y);
+      let at = 0;
+      for (const w of l.split(' ')) {
+        const pre = l.slice(0, l.indexOf(w, at)); at = pre.length + w.length;
+        const a = 150 + g.measureText(pre).width, m = g.measureText(w);
+        want.push({ text: w, x0: a * k, x1: (a + m.width) * k, y0: (y - m.actualBoundingBoxAscent) * k, y1: (y + m.actualBoundingBoxDescent) * k });
+      }
+    });
+    const b = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9));
+    return { jpg: Array.from(new Uint8Array(await b.arrayBuffer())), want };
+  }, BLOCK);
+  const d = await PDFDocument.create();
+  d.addPage([612, 792]).drawImage(await d.embedJpg(Uint8Array.from(fx.jpg)), { x: 0, y: 0, width: 612, height: 792 });
+  const got = await page.evaluate(async (a) => { const T = window.__umbraTest; await T.load(new Uint8Array(a)); return T.pageWords(0); }, Array.from(await d.save()));
+  const norm = (t) => t.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
+  // Each printed word is read, and its box sits on the word (centre inside the printed word, 3 pt slack).
+  const off = fx.want.filter((e) => !got.some((w) => norm(w.text) === norm(e.text)
+    && Math.abs((w.x0 + w.x1) / 2 - (e.x0 + e.x1) / 2) <= (e.x1 - e.x0) / 2 + 3 && Math.abs((w.y0 + w.y1) / 2 - (e.y0 + e.y1) / 2) <= (e.y1 - e.y0) / 2 + 3));
+  check(off.length === 0, `short block on a blank page: every word read where it is printed${off.length ? ` (missing or misplaced: ${off.map((e) => e.text).join(' ')}; read: ${got.map((w) => w.text).join(' ')})` : ''}`);
+}
+
 // ---------------- "Keep original text" (MuPDF true redaction) ----------------
 async function makeVectorFixture() {
   // Start from the leak-vector fixture (links, attachment, form field, metadata, SECRET ACCOUNT on 2 pages).
