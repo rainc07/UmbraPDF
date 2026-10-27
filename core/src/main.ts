@@ -556,7 +556,8 @@ function bindOverlay(ov: HTMLElement, page: number) {
 
 // ---------- Settings (persisted through the host) ----------
 type ThemePref = 'system' | 'light' | 'dark';
-interface ExportPrefs { dpi: number; format: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
+/** `compression` replaced 1.1.1's `format` so everyone starts on the new Auto default once. */
+interface ExportPrefs { dpi: number; compression: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
 interface Options { hideRecents: boolean; platesLabelled: boolean; confirmLeave: boolean; closeAfterRedact: boolean; reviewReminder: boolean }
 const DEFAULT_OPTIONS: Options = { hideRecents: true, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
 interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[]; always: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
@@ -581,7 +582,7 @@ function cleanAlways(v: unknown): string[] {
 function loadPrefs(): Prefs {
   const d: Prefs = {
     theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id), always: [] },
-    export: { dpi: DEFAULT_EXPORT.dpi, format: DEFAULT_EXPORT.format, searchable: true, method: 'vector' },
+    export: { dpi: DEFAULT_EXPORT.dpi, compression: DEFAULT_EXPORT.format, searchable: true, method: 'vector' },
     opts: { ...DEFAULT_OPTIONS },
     ui: { panelSide: 'right', panelW: 34 },
   };
@@ -602,7 +603,7 @@ function loadPrefs(): Prefs {
       ui: { panelSide: v.ui?.panelSide === 'left' ? 'left' : 'right', panelW: Number.isFinite(v.ui?.panelW) ? clampPanelW(v.ui!.panelW) : d.ui.panelW },
       export: {
         dpi: [150, 200, 300, 400, 600].includes(Number(v.export?.dpi)) ? Number(v.export!.dpi) : d.export.dpi,
-        format: v.export?.format === 'jpeg' ? 'jpeg' : 'png',
+        compression: (['png', 'jpeg'] as const).find((f) => f === v.export?.compression) ?? 'auto',
         method: v.export?.method === 'image' ? 'image' : 'vector',
         searchable: typeof v.export?.searchable === 'boolean' ? v.export.searchable : d.export.searchable,
       },
@@ -1309,7 +1310,8 @@ function exportDialog() {
         `<option value="${d}"${d === prefs.export.dpi ? ' selected' : ''}>${l} · ${d} DPI</option>`).join('')}
     </select></label>
     <label class="row2"><span>Compression</span><select id="x-fmt">
-      <option value="png"${prefs.export.format === 'png' ? ' selected' : ''}>Sharp (best for text)</option><option value="jpeg"${prefs.export.format === 'jpeg' ? ' selected' : ''}>Photo (JPEG)</option>
+      ${([['auto', 'Auto (smallest file)'], ['png', 'Sharp (lossless, larger)'], ['jpeg', 'Photo (JPEG)']] as const).map(([v, l]) =>
+        `<option value="${v}"${prefs.export.compression === v ? ' selected' : ''}>${l}</option>`).join('')}
     </select></label>
     <label class="row2"><span>Keep text selectable &amp; searchable (OCR)
       <small class="hint">Reads the visible text on your device so you can copy and search it. Blacked-out parts are never included.</small></span>
@@ -1345,7 +1347,7 @@ function exportDialog() {
       format: $<HTMLSelectElement>('#x-fmt').value as ExportOptions['format'],
       searchable: $<HTMLInputElement>('#x-search').checked,
     };
-    prefs.export = { dpi: opts.dpi, format: opts.format, searchable: opts.searchable, method }; savePrefs();
+    prefs.export = { dpi: opts.dpi, compression: opts.format, searchable: opts.searchable, method }; savePrefs();
     modal(`<h2>Preparing your copy…</h2><p id="x-msg" class="hint">Starting</p><progress id="x-bar" max="1" value="0"></progress>`);
     S.busy = true; syncToolbar();
     const w = startWork('Preparing your redacted copy');
