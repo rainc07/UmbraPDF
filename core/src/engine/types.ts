@@ -9,7 +9,7 @@ export type RedactionMap = ReadonlyArray<ReadonlyArray<Rect>>;
 
 export interface ExportOptions {
   dpi: number;            // default 300
-  format: 'png' | 'jpeg'; // png = lossless
+  format: 'auto' | 'png' | 'jpeg'; // png = lossless; auto = per page, lossless unless JPEG is much smaller
   jpegQuality: number;    // 0..1
   maxPixels: number;      // per-page cap; DPI is reduced for oversized pages
   searchable: boolean;    // add invisible OCR text layer (visible areas only)
@@ -17,8 +17,8 @@ export interface ExportOptions {
 
 export const DEFAULT_EXPORT: ExportOptions = {
   dpi: 300,
-  format: 'png',
-  jpegQuality: 0.92,
+  format: 'auto',
+  jpegQuality: 0.85,
   maxPixels: 36_000_000,
   searchable: false,
 };

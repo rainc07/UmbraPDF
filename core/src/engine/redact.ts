@@ -5,10 +5,12 @@ import {
 } from 'pdf-lib';
 import { recognizeWordsRobust, type OcrWord } from './ocr';
 import { renderToCanvas, type PDFDocumentProxy } from './pdf';
+import { scanDpi } from './search';
 import type { ExportOptions, ExportResult, Progress, RedactionMap, Rect } from './types';
 
 const PT_PER_IN = 72;
 const OCR_MAX_DPI = 300;
+const MIN_SCAN_DPI = 150;
 
 /** Pixel-snapped rect, expanded outward so partial pixels are always covered. */
 function toPixels(r: Rect, scale: number, pad = 1): [number, number, number, number] {
@@ -148,11 +150,8 @@ async function deflate(data: Uint8Array): Promise<Uint8Array | null> {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-/**
- * Lossless page pixels for FlateDecode: 1 channel when the page is grey (most documents), else RGB,
- * with PNG Paeth prediction per row (PDF Predictor 15), which typically halves the compressed size.
- */
-function canvasPixels(c: HTMLCanvasElement): { data: Uint8Array; colors: 1 | 3 } {
+/** Canvas pixels and whether the page is grey (most documents), so lossless can store 1 channel instead of 3. */
+function readPixels(c: HTMLCanvasElement): { px: Uint8ClampedArray; W: number; H: number; gray: boolean } {
   const W = c.width, H = c.height;
   const px = c.getContext('2d')!.getImageData(0, 0, W, H).data;
   let gray = true;
@@ -160,15 +159,24 @@ function canvasPixels(c: HTMLCanvasElement): { data: Uint8Array; colors: 1 | 3 }
     const r = px[i], g = px[i + 1], b = px[i + 2];
     if (Math.abs(r - g) > 3 || Math.abs(g - b) > 3 || Math.abs(r - b) > 3) { gray = false; break; }
   }
+  return { px, W, H, gray };
+}
+
+/**
+ * Lossless page pixels for FlateDecode: 1 channel when grey, else RGB, with PNG Paeth prediction per row
+ * (PDF Predictor 15), which typically halves the compressed size. `rows` limits it to those rows (a size sample).
+ */
+function losslessPixels({ px, W, H, gray }: ReturnType<typeof readPixels>, rows?: number[]): { data: Uint8Array; colors: 1 | 3 } {
   const colors: 1 | 3 = gray ? 1 : 3;
+  const ys = rows ?? Array.from({ length: H }, (_, y) => y);
   const rowLen = W * colors;
-  const out = new Uint8Array((rowLen + 1) * H);
+  const out = new Uint8Array((rowLen + 1) * ys.length);
   let prev = new Uint8Array(rowLen), cur = new Uint8Array(rowLen);
-  for (let y = 0; y < H; y++) {
-    const base = y * W * 4;
+  for (let n = 0; n < ys.length; n++) {
+    const base = ys[n] * W * 4;
     if (gray) for (let x = 0; x < W; x++) cur[x] = px[base + x * 4 + 1];
     else for (let x = 0, j = 0; x < W; x++) { const k = base + x * 4; cur[j++] = px[k]; cur[j++] = px[k + 1]; cur[j++] = px[k + 2]; }
-    const o = y * (rowLen + 1);
+    const o = n * (rowLen + 1);
     out[o] = 4; // Paeth
     for (let i = 0; i < rowLen; i++) {
       const a = i >= colors ? cur[i - colors] : 0, b = prev[i], cc = i >= colors ? prev[i - colors] : 0;
@@ -179,6 +187,36 @@ function canvasPixels(c: HTMLCanvasElement): { data: Uint8Array; colors: 1 | 3 }
     const t = prev; prev = cur; cur = t;
   }
   return { data: out, colors };
+}
+
+/** Auto keeps lossless (crisper text) unless it is this much bigger than the JPEG. */
+const AUTO_LOSSLESS_MAX = 1.25;
+/** Rows sampled to estimate the lossless size: bands of 16 rows, one in every 8. */
+function sampleRows(H: number): number[] {
+  const out: number[] = [];
+  for (let y = 0; y < H; y += 128) for (let k = 0; k < 16 && y + k < H; k++) out.push(y + k);
+  return out;
+}
+
+/** Lossless (Flate) or JPEG bytes for the page, per opts.format. */
+async function encodePage(canvas: HTMLCanvasElement, opts: ExportOptions):
+  Promise<{ flate: Uint8Array; colors: 1 | 3 } | { jpeg: Uint8Array }> {
+  if (opts.format === 'jpeg') return { jpeg: await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
+  const pix = readPixels(canvas);
+  let jpeg: Uint8Array | null = null;
+  if (opts.format === 'auto') {
+    jpeg = await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality);
+    // Scans (paper grain, photos) compress poorly without loss: skip the full lossless pass when a sample says so.
+    const rows = sampleRows(pix.H);
+    const est = await deflate(losslessPixels(pix, rows).data);
+    if (!est) return { jpeg };
+    if (est.length * (pix.H / rows.length) > jpeg.length * AUTO_LOSSLESS_MAX * 1.2) return { jpeg };
+  }
+  const lossless = losslessPixels(pix);
+  const flate = await deflate(lossless.data);
+  if (!flate) return { jpeg: jpeg ?? await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
+  if (jpeg && flate.length > jpeg.length * AUTO_LOSSLESS_MAX) return { jpeg };
+  return { flate, colors: lossless.colors };
 }
 
 function canvasToBytes(c: HTMLCanvasElement, type: string, q?: number): Promise<Uint8Array> {
@@ -214,7 +252,9 @@ export async function exportRedacted(
     const page = await src.getPage(i);
     const base = page.getViewport({ scale: 1 });
 
-    let scale = opts.dpi / PT_PER_IN;
+    // A scanned page holds no more detail than its picture: don't render it larger (min 150 DPI for OCR).
+    const srcDpi = await scanDpi(page).catch(() => null);
+    let scale = Math.min(opts.dpi, srcDpi ? Math.max(MIN_SCAN_DPI, Math.ceil(srcDpi)) : Infinity) / PT_PER_IN;
     const px = base.width * scale * base.height * scale;
     if (px > opts.maxPixels) {
       scale *= Math.sqrt(opts.maxPixels / px);
@@ -265,22 +305,21 @@ export async function exportRedacted(
 
       onProgress(`Compressing page ${i}/${n}`, (i - 0.5) / n);
       const p = out.addPage([base.width, base.height]);
-      // Lossless: grey or RGB pixels, PNG-predicted, native Flate (fast). Avoids pdf-lib's pure-JS PNG decode.
-      const lossless = opts.format === 'png' ? canvasPixels(canvas) : null;
-      const flate = lossless ? await deflate(lossless.data) : null;
-      if (flate && lossless) {
+      // Lossless is written as raw Flate (native, fast), avoiding pdf-lib's pure-JS PNG decode.
+      const enc = await encodePage(canvas, opts);
+      if ('flate' in enc) {
         const dict = out.context.obj({
           Type: 'XObject', Subtype: 'Image', Width: canvas.width, Height: canvas.height,
-          ColorSpace: lossless.colors === 1 ? 'DeviceGray' : 'DeviceRGB', BitsPerComponent: 8, Filter: 'FlateDecode',
-          DecodeParms: { Predictor: 15, Colors: lossless.colors, BitsPerComponent: 8, Columns: canvas.width },
+          ColorSpace: enc.colors === 1 ? 'DeviceGray' : 'DeviceRGB', BitsPerComponent: 8, Filter: 'FlateDecode',
+          DecodeParms: { Predictor: 15, Colors: enc.colors, BitsPerComponent: 8, Columns: canvas.width },
         });
-        const name = p.node.newXObject('Im', out.context.register(PDFRawStream.of(dict, flate)));
+        const name = p.node.newXObject('Im', out.context.register(PDFRawStream.of(dict, enc.flate)));
         p.pushOperators(
           pushGraphicsState(), concatTransformationMatrix(base.width, 0, 0, base.height, 0, 0),
           drawObject(name), popGraphicsState(),
         );
       } else {
-        const img = await out.embedJpg(await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality));
+        const img = await out.embedJpg(enc.jpeg);
         p.drawImage(img, { x: 0, y: 0, width: base.width, height: base.height });
       }
       if (words.length) {

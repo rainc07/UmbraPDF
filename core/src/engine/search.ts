@@ -258,6 +258,45 @@ export async function imageRegions(page: PDFPageProxy): Promise<Rect[]> {
   return out.filter((r, i) => !out.some((q, j) => j !== i && q.x <= r.x && q.y <= r.y && q.x + q.w >= r.x + r.w && q.y + q.h >= r.y + r.h && (j < i || q.w * q.h > r.w * r.h)));
 }
 
+/**
+ * A scanned page (one picture covering the page, no visible text): the picture's own resolution in DPI,
+ * so an export doesn't render it larger than its source. Null for any other page.
+ */
+export async function scanDpi(page: PDFPageProxy): Promise<number | null> {
+  const vp = page.getViewport({ scale: 1 });
+  const ops = await page.getOperatorList();
+  type M = number[];
+  const mul = (m: M, n: M): M => Util.transform(m, n) as M;
+  let ctm: M = [1, 0, 0, 1, 0, 0];
+  const stack: M[] = [];
+  const TEXT = new Set([OPS.showText, OPS.showSpacedText, OPS.nextLineShowText, OPS.nextLineSetSpacingShowText]);
+  const OTHER_IMG = new Set([OPS.paintInlineImageXObject, OPS.paintImageXObjectRepeat, OPS.paintImageMaskXObject, OPS.paintImageMaskXObjectRepeat]);
+  let mode = 0, dpi: number | null = null;
+  for (let k = 0; k < ops.fnArray.length; k++) {
+    const fn = ops.fnArray[k], a = ops.argsArray[k] as unknown[];
+    if (fn === OPS.save) stack.push(ctm);
+    else if (fn === OPS.restore) ctm = stack.pop() ?? ctm;
+    else if (fn === OPS.transform) ctm = mul(ctm, a as M);
+    else if (fn === OPS.paintFormXObjectBegin) { stack.push(ctm); if (Array.isArray(a?.[0])) ctm = mul(ctm, a[0] as M); }
+    else if (fn === OPS.paintFormXObjectEnd) ctm = stack.pop() ?? ctm;
+    else if (fn === OPS.setTextRenderingMode) mode = Number(a[0]);
+    else if (TEXT.has(fn)) { if (mode !== 3) return null; } // invisible text (an earlier OCR layer) is fine
+    else if (OTHER_IMG.has(fn)) return null;
+    else if (fn === OPS.paintImageXObject) {
+      if (dpi !== null) return null;
+      const m = mul(vp.transform as M, ctm);
+      const r = aabb([[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]] as [number, number]));
+      const cover = (Math.min(vp.width, r.x + r.w) - Math.max(0, r.x)) * (Math.min(vp.height, r.y + r.h) - Math.max(0, r.y));
+      if (!(cover >= 0.9 * vp.width * vp.height)) return null;
+      const w = Number(a[1]), h = Number(a[2]);
+      const sw = Math.hypot(m[0], m[1]), sh = Math.hypot(m[2], m[3]);
+      if (!(w > 0 && h > 0 && sw > 0 && sh > 0)) return null;
+      dpi = Math.max(w / sw, h / sh) * 72;
+    }
+  }
+  return dpi;
+}
+
 /** A typed page with pictures: OCR each picture and add its words after the real text. */
 async function addImageText(page: PDFPageProxy, t: PageText, dpi: number, onStatus: (s: string) => void): Promise<PageText> {
   const regions = await imageRegions(page);
