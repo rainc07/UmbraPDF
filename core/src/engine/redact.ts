@@ -1,5 +1,5 @@
 import {
-  PDFDocument, PDFRawStream, PDFFont, PDFPage, StandardFonts, TextRenderingMode,
+  PDFDocument, PDFRawStream, PDFFont, PDFName, PDFPage, StandardFonts, TextRenderingMode,
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject,
   beginText, endText, setFontAndSize, setTextRenderingMode, setCharacterSqueeze, setTextMatrix, showText,
 } from 'pdf-lib';
@@ -65,25 +65,57 @@ function encodable(font: PDFFont, text: string): string {
 /**
  * Invisible text layer (render mode 3) from OCR of the *redacted* pixels.
  * It can only contain what is visible in the output image; words near a box are dropped too.
+ * Each line is laid out as one line of text: the same size, one straight (possibly tilted) baseline fitted through
+ * its words, and real spaces between words, so viewers read, copy and search it as "Tan Chee Kin", not "TanCheeKin".
  */
 function addTextLayer(
-  page: PDFPage, font: PDFFont, fontName: string, words: OcrWord[],
+  page: PDFPage, font: PDFFont, fontName: PDFName, words: OcrWord[], boxesPx: [number, number, number, number][],
   pxW: number, pxH: number, ptW: number, ptH: number,
 ): void {
   const sx = ptW / pxW, sy = ptH / pxH;
+  const space = font.encodeText(' '), spaceEm = font.widthOfTextAtSize(' ', 1);
+  const median = (v: number[]) => [...v].sort((a, b) => a - b)[v.length >> 1];
   const ops = [beginText(), setTextRenderingMode(TextRenderingMode.Invisible)];
-  for (const w of words) {
-    const text = encodable(font, w.text);
-    const h = (w.y1 - w.y0) * sy;
-    const width = (w.x1 - w.x0) * sx;
-    const natural = font.widthOfTextAtSize(text, h);
-    if (h <= 0 || natural <= 0) continue;
-    ops.push(
-      setFontAndSize(fontName, h),
-      setCharacterSqueeze((width / natural) * 100),
-      setTextMatrix(1, 0, 0, 1, w.x0 * sx, ptH - w.y1 * sy + h * 0.2),
-      showText(font.encodeText(text)),
-    );
+  for (let i0 = 0; i0 < words.length;) {
+    let i1 = i0 + 1;
+    while (i1 < words.length && words[i1].line === words[i0].line) i1++;
+    const ws = words.slice(i0, i1).map((w) => ({ w, text: encodable(font, w.text), cx: (w.x0 + w.x1) / 2, cy: (w.y0 + w.y1) / 2, bw: w.x1 - w.x0, bh: w.y1 - w.y0 }));
+    i0 = i1;
+    // Baseline direction (pixels, y down): least-squares line through the word centres. A single word, or a
+    // sideways line (words taller than wide), keeps its own upright box as before.
+    const n = ws.length, mx = ws.reduce((a, q) => a + q.cx, 0) / n, my = ws.reduce((a, q) => a + q.cy, 0) / n;
+    const sxx = ws.reduce((a, q) => a + (q.cx - mx) ** 2, 0), sxy = ws.reduce((a, q) => a + (q.cx - mx) * (q.cy - my), 0);
+    const along = n > 1 && sxx > 0 && median(ws.map((q) => q.bw / Math.max(1, q.bh))) > 0.5;
+    const th = along ? Math.max(-0.5, Math.min(0.5, Math.atan(sxy / sxx))) : 0;
+    const c = Math.cos(th), s = Math.sin(th);
+    // Line height across the baseline, and each word's length along it (its upright box minus the tilt).
+    const H = along ? median(ws.map((q) => Math.max(0.3 * q.bh, (q.bh - q.bw * Math.abs(s)) / c))) : 0;
+    const placed = ws.map((q) => {
+      const h = along ? H : q.bh, L = along ? Math.max(1, (q.bw - H * Math.abs(s)) / c) : q.bw;
+      const cy = along ? my + Math.tan(th) * (q.cx - mx) : q.cy; // centre on the fitted line
+      const u = q.cx * c + cy * s; // position along the baseline
+      return { ...q, h, L, cy, u0: u - L / 2, u1: u + L / 2 };
+    });
+    placed.forEach((q, k) => {
+      const size = q.h * sy, natural = font.widthOfTextAtSize(q.text, size);
+      if (size <= 0 || natural <= 0) return;
+      // Start of the word on its baseline (0.3 of the line height below the centre line), in page points.
+      const bx = q.cx - (q.L / 2) * c - 0.3 * q.h * s, by = q.cy - (q.L / 2) * s + 0.3 * q.h * c;
+      ops.push(
+        setFontAndSize(fontName, size),
+        setCharacterSqueeze(((q.L * sx) / natural) * 100),
+        setTextMatrix(c, -s, s, c, bx * sx, ptH - by * sy),
+        showText(font.encodeText(q.text)),
+      );
+      // A space after every word but the line's last. It fills the gap to the next word when the gap is free of
+      // boxes (and not a column gap); otherwise it's a hairline at the word's end, so text never reaches a box.
+      const next = placed[k + 1];
+      if (!next) return;
+      const gap = next.u0 - q.u1, m = Math.max(2, q.h * 0.08);
+      const gx0 = Math.min(q.w.x1, next.w.x0), gx1 = Math.max(q.w.x1, next.w.x0);
+      const clear = gap > 0 && gap < 3 * q.h && !boxesPx.some((b) => intersects([gx0, Math.min(q.w.y0, next.w.y0) - m, gx1 - gx0, Math.max(q.w.y1, next.w.y1) - Math.min(q.w.y0, next.w.y0) + 2 * m], b));
+      ops.push(setCharacterSqueeze(clear ? ((gap * sx) / (spaceEm * size)) * 100 : 1), showText(space));
+    });
   }
   ops.push(endText());
   page.pushOperators(...ops);
@@ -233,8 +265,8 @@ export async function exportRedacted(
       }
       if (words.length) {
         font ??= await out.embedFont(StandardFonts.Helvetica); // standard 14: no font program embedded
-        const fontName = p.node.newFontDictionary('F', font.ref).asString();
-        addTextLayer(p, font, fontName, words, canvas.width, canvas.height, base.width, base.height);
+        const fontName = p.node.newFontDictionary('F', font.ref); // a PDFName (its string form has a '/', which breaks Tf)
+        addTextLayer(p, font, fontName, words, boxesPx, canvas.width, canvas.height, base.width, base.height);
         ocrWords += words.length;
       }
     } finally {

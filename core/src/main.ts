@@ -1467,6 +1467,7 @@ syncToolbar();
   zoom: () => S.zoom,
   detectPrefs: () => prefs.detect,
   pageText: async (i: number) => (await S.texts!.get(i)).text,
+  pageWords: async (i: number) => pageTextWords(await S.texts!.get(i)).map(({ text, line, x0, y0, x1, y1 }) => ({ text, line, x0, y0, x1, y1 })),
   ocrStats: () => ({ ...lastOcrStats, log: [...lastOcrStats.log] }),
   resetOcrStats: () => resetOcrStats(),
   setOcrEngine: (e: 'paddle' | 'tesseract') => setOcrEngine(e),
