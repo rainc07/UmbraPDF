@@ -602,6 +602,28 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
   rows.forEach((_, i) => check(hits[i]?.text === 'Tan Chee Kin' && hits[i].x1 >= img.ends[i] - 1, `scanned name with a split line ${i + 1}: "${hits[i]?.text}" covers the whole name (${Math.round(hits[i]?.x1 ?? 0)} >= ${Math.round(img.ends[i])})`));
 }
 
+// Settings → "Always redact" on a scanned page (OCR): any case, across a line break, whole words only.
+{
+  const img = await page.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 1654; c.height = 2339; const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#111'; g.font = '30px serif';
+    ['Agreement signed by TAN CHEE', 'KIN as the buyer of the unit.', 'Office: Kuala Lumpur Sentral', 'Lumpurville Holdings is unrelated.'].forEach((t, i) => g.fillText(t, 150, 200 + i * 60));
+    const bl = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+    return Array.from(new Uint8Array(await bl.arrayBuffer()));
+  });
+  const d = await PDFDocument.create(); const p = d.addPage([595, 842]);
+  p.drawImage(await d.embedJpg(Uint8Array.from(img)), { x: 0, y: 0, width: 595, height: 842 });
+  const hits = await page.evaluate(async (b) => {
+    const T = window.__umbraTest; await T.load(new Uint8Array(b));
+    T.setAlways(['tan chee kin', 'Kuala Lumpur', 'Lumpur']);
+    const h = (await T.detect([])).map((x) => ({ label: x.label, text: x.text.replace(/\s+/g, ' '), boxes: x.rects.length }));
+    T.setAlways([]);
+    return h;
+  }, Array.from(await d.save()));
+  const texts = hits.filter((h) => h.label === 'Always redact').map((h) => h.text).sort();
+  check(JSON.stringify(texts) === '["Kuala Lumpur","TAN CHEE KIN"]', `always redact (scanned): name split over two lines and the place found, not inside "Lumpurville" (${JSON.stringify(hits)})`);
+}
+
 await browser.close();
 server.close();
 console.log(failed ? `\n${failed} check(s) failed` : '\nALL CHECKS PASSED');
