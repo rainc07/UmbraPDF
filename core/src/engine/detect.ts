@@ -1,5 +1,5 @@
 // Personal-data detection presets (Malaysia-focused). Pure logic: regex + validators, no DOM.
-import type { PageText, SearchPattern } from './search';
+import { literalPattern, type PageText, type SearchPattern } from './search';
 
 export interface Preset {
   id: string;
@@ -405,7 +405,18 @@ export function compileCustom(c: CustomPattern): RegExp {
 }
 
 /** Expand enabled presets + custom patterns into search patterns. Invalid custom patterns are skipped. */
-export interface DetectOptions { /** Vehicle plates only next to a label (vehicle, kenderaan, plate…). */ platesNeedLabel?: boolean }
+export interface DetectOptions {
+  /** Vehicle plates only next to a label (vehicle, kenderaan, plate…). */ platesNeedLabel?: boolean;
+  /** Settings → "Always redact": words/phrases found whole-word, any case, across spaces and line breaks. */ always?: readonly string[];
+}
+
+export const ALWAYS_LABEL = 'Always redact';
+export const ALWAYS_MAX = 500; // words in the list
+export const ALWAYS_MAX_LEN = 200; // characters per word/phrase
+
+/** Tidy a list entry (collapse spacing); '' if it can't be used. */
+export const normAlways = (w: string) => w.replace(/\s+/g, ' ').trim().slice(0, ALWAYS_MAX_LEN);
+
 
 export function buildPatterns(enabled: readonly string[], custom: readonly CustomPattern[] = [], opts: DetectOptions = {}): SearchPattern[] {
   const out: SearchPattern[] = [];
@@ -418,6 +429,10 @@ export function buildPatterns(enabled: readonly string[], custom: readonly Custo
   }
   custom.forEach((c, i) => {
     try { out.push({ id: `custom.${i}`, label: c.label.trim() || 'Custom', regex: compileCustom(c) }); } catch { /* skipped */ }
+  });
+  (opts.always ?? []).forEach((w, i) => {
+    const re = literalPattern(normAlways(w), false, true);
+    if (re) out.push({ id: `always.${i}`, label: ALWAYS_LABEL, regex: re });
   });
   return out;
 }

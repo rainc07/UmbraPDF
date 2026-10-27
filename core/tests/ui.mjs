@@ -266,6 +266,36 @@ for (const [w, h] of [[412, 860], [915, 412]]) {
 const dp = await page.evaluate(() => window.__umbraTest.detectPrefs());
 check(dp.enabled.includes('tin') && !dp.enabled.includes('address'), `update: new TIN detector switched on, user's own choices kept (${dp.enabled.join(',')})`);
 
+
+// Settings → "Always redact": add (no duplicates, any case), persists, and Auto Detect finds the words whole-word across line breaks.
+check(Array.isArray(dp.always) && dp.always.length === 0, `update: older settings get an empty "Always redact" list (${JSON.stringify(dp.always)})`);
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+for (const w of ['Tan  Ah Kow', 'tan ah kow', 'Ali', '   ']) { await page.fill('#s-aw', w); await page.press('#s-aw', 'Enter'); }
+const awUi = await page.evaluate(() => [...document.querySelectorAll('#s-aw-list .tl')].map((e) => e.textContent));
+check(JSON.stringify(awUi) === '["Tan Ah Kow","Ali"]', `always redact: added, tidied, duplicates and blanks skipped (${JSON.stringify(awUi)})`);
+await page.fill('#s-aw', 'Remove Me'); await page.press('#s-aw', 'Enter');
+await page.click('#s-aw-list [data-rmaw="2"]');
+await page.click('#s-close'); await page.waitForTimeout(250);
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+const awSaved = (await page.evaluate(() => window.__umbraTest.detectPrefs())).always;
+check(JSON.stringify(awSaved) === '["Tan Ah Kow","Ali"]', `always redact: removing works and the list is saved (${JSON.stringify(awSaved)})`);
+{
+  const d3 = await PDFDocument.create(); const f3 = await d3.embedFont(StandardFonts.Helvetica);
+  const p3 = d3.addPage([612, 792]);
+  p3.drawText('Signed for the company by Mr TAN AH', { x: 72, y: 700, size: 14, font: f3 });
+  p3.drawText('KOW on behalf of Alibaba Trading.', { x: 72, y: 682, size: 14, font: f3 });
+  p3.drawText('Witness: Ali bin Abu', { x: 72, y: 650, size: 14, font: f3 });
+  const hits = await page.evaluate(async (a) => {
+    const T = window.__umbraTest; await T.load(new Uint8Array(a));
+    return (await T.detect([])).map((h) => ({ label: h.label, text: h.text, boxes: h.rects?.length ?? 0 }));
+  }, Array.from(await d3.save()));
+  const al = hits.filter((h) => h.label === 'Always redact');
+  check(al.length === 2 && al.every((h) => h.label === 'Always redact'), `always redact: Auto Detect finds both words, "Ali" not inside "Alibaba" (${JSON.stringify(hits)})`);
+  check(al.some((h) => /^TAN AH\s+KOW$/.test(h.text) && h.boxes === 2), `always redact: phrase split across two lines is found (${JSON.stringify(al)})`);
+  await T('reset');
+}
+
 check(errors.length === 0, `no page errors ${errors.join(' | ')}`);
 await browser.close(); server.close();
 console.log(failed ? `\n${failed} CHECK(S) FAILED` : '\nALL UI CHECKS PASSED');

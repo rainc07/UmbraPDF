@@ -3,6 +3,7 @@ import {
   openPdf, closePdf, pageSizes, renderToCanvas, exportRedacted, verifyOutput, ocrRedactedRegions,
   PasswordRequiredError, DEFAULT_EXPORT,
   PageTextCache, pageTextWords, searchDocument, exportVector, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
+  normAlways, ALWAYS_MAX,
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
   type Hit, type SearchPattern, type CustomPattern,
 } from './engine';
@@ -558,7 +559,7 @@ type ThemePref = 'system' | 'light' | 'dark';
 interface ExportPrefs { dpi: number; format: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
 interface Options { hideRecents: boolean; platesLabelled: boolean; confirmLeave: boolean; closeAfterRedact: boolean; reviewReminder: boolean }
 const DEFAULT_OPTIONS: Options = { hideRecents: false, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
-interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
+interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[]; always: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
 /** Landscape side panel: which side, and its width in % of the screen (20–45). */
 interface UiPrefs { panelSide: 'left' | 'right'; panelW: number }
 const clampPanelW = (w: number) => Math.min(45, Math.max(20, Math.round(w)));
@@ -568,9 +569,18 @@ function withNewPresets(d: Prefs['detect']): Prefs['detect'] {
   const added = PRESETS.filter((p) => !known.includes(p.id) && p.defaultOn && !d.enabled.includes(p.id)).map((p) => p.id);
   return { ...d, enabled: [...d.enabled, ...added], known: PRESETS.map((p) => p.id) };
 }
+/** Settings → "Always redact" list: tidy, no blanks or duplicates (any case), capped. */
+function cleanAlways(v: unknown): string[] {
+  const out: string[] = [], seen = new Set<string>();
+  for (const x of Array.isArray(v) ? v : []) {
+    const w = typeof x === 'string' ? normAlways(x) : '';
+    if (w && !seen.has(w.toLowerCase()) && out.length < ALWAYS_MAX) { seen.add(w.toLowerCase()); out.push(w); }
+  }
+  return out;
+}
 function loadPrefs(): Prefs {
   const d: Prefs = {
-    theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id) },
+    theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id), always: [] },
     export: { dpi: DEFAULT_EXPORT.dpi, format: DEFAULT_EXPORT.format, searchable: true, method: 'vector' },
     opts: { ...DEFAULT_OPTIONS },
     ui: { panelSide: 'right', panelW: 34 },
@@ -587,7 +597,8 @@ function loadPrefs(): Prefs {
         for (const k of Object.keys(o) as (keyof Options)[]) if (typeof raw[k] === 'boolean') o[k] = raw[k] as boolean;
         return o;
       })(),
-      detect: v.detect && Array.isArray(v.detect.enabled) && Array.isArray(v.detect.custom) ? withNewPresets(v.detect) : d.detect,
+      detect: v.detect && Array.isArray(v.detect.enabled) && Array.isArray(v.detect.custom)
+        ? { ...withNewPresets(v.detect), always: cleanAlways(v.detect.always) } : d.detect,
       ui: { panelSide: v.ui?.panelSide === 'left' ? 'left' : 'right', panelW: Number.isFinite(v.ui?.panelW) ? clampPanelW(v.ui!.panelW) : d.ui.panelW },
       export: {
         dpi: [150, 200, 300, 400, 600].includes(Number(v.export?.dpi)) ? Number(v.export!.dpi) : d.export.dpi,
@@ -636,6 +647,11 @@ function settingsDialog() {
     <h3>Preferences</h3>
     ${OPTION_ROWS.filter(([k]) => k !== 'hideRecents' || host.name === 'android').map(([k, t, h]) => `<label class="row2"><span>${t}<small class="hint">${h}</small></span>
       <input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}></label>`).join('')}
+    <h3>Always redact</h3>
+    <p class="hint">Names, places or other words Auto Detect should always find, in any case and across line breaks. Kept on this device only.</p>
+    <form class="prow" id="s-aw-form"><input id="s-aw" placeholder="Word or phrase, e.g. Tan Ah Kow" autocomplete="off" spellcheck="false" maxlength="200" enterkeyhint="done">
+      <button class="primary">Add</button></form>
+    <div class="tchips" id="s-aw-list"></div>
     <h3>Advanced</h3>
     <label class="row2"><span>Show technical check report<small class="hint">For IT and troubleshooting. The safety check always runs either way.</small></span>
       <input id="s-adv" class="switch" type="checkbox" ${prefs.advanced ? 'checked' : ''}></label>
@@ -648,6 +664,23 @@ function settingsDialog() {
       $('#sheet').querySelectorAll('[data-theme-opt]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
     };
   });
+  const aw = prefs.detect;
+  const renderAlways = () => {
+    $('#s-aw-list').innerHTML = aw.always.map((w, i) => `<span class="tchip on"><span class="tl">${esc(w)}</span>
+      <button type="button" class="tx" data-rmaw="${i}" aria-label="Remove ${esc(w)}">×</button></span>`).join('');
+  };
+  renderAlways();
+  $('#s-aw-form').onsubmit = (e) => {
+    e.preventDefault();
+    const inp = $<HTMLInputElement>('#s-aw');
+    aw.always = cleanAlways([...aw.always, inp.value]); savePrefs(); renderAlways();
+    inp.value = ''; inp.focus();
+  };
+  $('#s-aw-list').onclick = (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-rmaw]');
+    if (!b) return;
+    aw.always.splice(Number(b.dataset.rmaw), 1); savePrefs(); renderAlways();
+  };
   $<HTMLInputElement>('#s-adv').onchange = (e) => { prefs.advanced = (e.target as HTMLInputElement).checked; savePrefs(); };
   $('#sheet').querySelectorAll<HTMLInputElement>('[data-opt]').forEach((cb) => {
     cb.onchange = () => {
@@ -1102,7 +1135,7 @@ function renderTerms() {
 }
 
 async function runDetect(enabled: string[], custom: CustomPattern[]) {
-  const patterns = buildPatterns(enabled, custom, { platesNeedLabel: prefs.opts.platesLabelled });
+  const patterns = buildPatterns(enabled, custom, { platesNeedLabel: prefs.opts.platesLabelled, always: prefs.detect.always });
   S.resTab = 'items';
   if (!patterns.length) { status('Turn on at least one detector.'); return; }
   await runScan(patterns, 'personal detail(s)', true);
@@ -1151,7 +1184,7 @@ function openDetect() {
   const dp = prefs.detect;
   showPanel(`<div class="ph"><b>Auto find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
     <div class="prow"><button id="d-go" class="primary" data-busy>Scan document</button></div>
-    <p class="hint intro">Finds IC numbers, phones, emails, accounts, addresses and labelled names. Nothing is redacted until you confirm. Use Find for anything it misses.</p>
+    <p class="hint intro">Finds IC numbers, phones, emails, accounts, addresses and labelled names. Nothing is redacted until you confirm. Use Find for anything it misses.${dp.always.length ? ` Also finds your ${dp.always.length} “Always redact” word${dp.always.length === 1 ? '' : 's'} from Settings.` : ' Names or places to always redact can be added in Settings on the home screen.'}</p>
     <div id="p-status" class="hint" role="status"></div><div id="p-results"></div>
     <details id="d-cfg"><summary>Advanced config <small class="hint">· choose detectors, custom patterns</small></summary>
       <div class="grid" id="d-grid"></div>
@@ -1468,6 +1501,7 @@ syncToolbar();
   boxes: () => S.boxes,
   zoom: () => S.zoom,
   detectPrefs: () => prefs.detect,
+  setAlways: (w: string[]) => { prefs.detect.always = cleanAlways(w); savePrefs(); return prefs.detect.always; },
   pageText: async (i: number) => (await S.texts!.get(i)).text,
   pageWords: async (i: number) => pageTextWords(await S.texts!.get(i)).map(({ text, line, x0, y0, x1, y1 }) => ({ text, line, x0, y0, x1, y1 })),
   ocrStats: () => ({ ...lastOcrStats, log: [...lastOcrStats.log] }),
