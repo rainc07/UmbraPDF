@@ -49,6 +49,9 @@ jobs:
           CHROMIUM_PATH="$(command -v google-chrome || command -v chromium)" npm test 2>&1 | tee test.log
       - name: Desktop web app (server with native OCR)
         working-directory: web
+        env:
+          # onnxruntime-node bundles its CPU binaries; skip its optional CUDA download.
+          ONNXRUNTIME_NODE_INSTALL: skip
         run: |
           set -o pipefail
           export CHROMIUM_PATH="$(command -v google-chrome || command -v chromium)"
