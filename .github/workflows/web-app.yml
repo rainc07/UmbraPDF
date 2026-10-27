@@ -1,0 +1,111 @@
+# Desktop web app packages: a Windows installer + portable zip, and a Linux tar.gz, each with its own Node.js runtime
+# (no git, Node or npm needed to run them). Every package is smoke-tested; the Windows installer is also installed,
+# tested from the install folder and uninstalled. Run artifacts on pushes; attached to the release when one is published.
+name: Desktop web app packages
+
+on:
+  push:
+    branches: ['**']
+    paths: ['web/**', 'core/**', '.github/workflows/web-app.yml']
+  pull_request:
+    paths: ['web/**', 'core/**', '.github/workflows/web-app.yml']
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: write # gh release upload
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: win-x64 }
+          - { os: ubuntu-latest, target: linux-x64 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      # onnxruntime-node bundles its CPU binaries; skip its optional CUDA download.
+      ONNXRUNTIME_NODE_INSTALL: skip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            core/package-lock.json
+            web/package-lock.json
+      - name: Version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = release ]; then v="${GITHUB_REF_NAME#v}"
+          else v="$(node -p "require('./web/package.json').version")-dev.${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: |
+          (cd core && npm ci && npm run build)
+          cd web && npm ci && npm run build
+          node package/build.mjs --target ${{ matrix.target }}
+      - name: Smoke test (built folder)
+        working-directory: web
+        run: node package/smoke.mjs release/UmbraPDF-Web-${{ matrix.target }}
+
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        working-directory: web/package
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /Q "/DAppVersion=${{ steps.v.outputs.version }}" "/DSrc=..\release\UmbraPDF-Web-win-x64" "/O..\release" umbra-web.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Install, smoke test installed copy, uninstall
+        if: runner.os == 'Windows'
+        working-directory: web/release
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\Umbra PDF"
+          Start-Process -Wait ".\UmbraPDF-Web-Setup-${{ steps.v.outputs.version }}.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          if (-not (Test-Path "$dir\Umbra PDF.cmd")) { throw "not installed in $dir" }
+          node ..\package\smoke.mjs "$dir"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          for ($i = 0; $i -lt 30 -and (Test-Path "$dir\server.mjs"); $i++) { Start-Sleep 1 }
+          if (Test-Path "$dir\server.mjs") { throw "uninstall left files in $dir" }
+      - name: Archives
+        working-directory: web/release
+        run: |
+          v=${{ steps.v.outputs.version }}
+          if [ "${{ runner.os }}" = Windows ]; then
+            mv UmbraPDF-Web-win-x64 "UmbraPDF-Web-$v-win-x64"
+            7z a -tzip -mx=9 -bd "UmbraPDF-Web-$v-win-x64.zip" "UmbraPDF-Web-$v-win-x64" > /dev/null
+          else
+            mv UmbraPDF-Web-linux-x64 "UmbraPDF-Web-$v-linux-x64"
+            tar -czf "UmbraPDF-Web-$v-linux-x64.tar.gz" "UmbraPDF-Web-$v-linux-x64"
+          fi
+          rm -rf "UmbraPDF-Web-$v-${{ matrix.target }}"
+          sha256sum UmbraPDF-Web-* | tee SHA256SUMS-${{ matrix.target }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UmbraPDF-Web-${{ steps.v.outputs.version }}-${{ matrix.target }}
+          path: web/release/
+          retention-days: 14
+      - name: Attach to release
+        if: github.event_name == 'release'
+        working-directory: web/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" UmbraPDF-Web-* SHA256SUMS-* --clobber

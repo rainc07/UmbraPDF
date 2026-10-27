@@ -60,9 +60,19 @@ npm run dev             # browser dev server
 
 ## Desktop web app (Windows, macOS, Linux)
 The same app in your browser, served from your own computer only (127.0.0.1). Text in scanned pages is read by
-ONNX Runtime for Node: the same PaddleOCR models and steps as Android, natively and multi-threaded. Needs Node.js 20+.
+ONNX Runtime for Node: the same PaddleOCR models and steps as Android, natively and multi-threaded.
 
-Windows: double-click `web\Umbra PDF.cmd` (installs and builds on first run). Or:
+**Install (no Node.js or git needed):** each release has `UmbraPDF-Web-Setup-<version>.exe` (Windows; per user, no
+admin prompt, Start menu shortcut, uninstaller), a portable Windows `.zip` and a Linux `.tar.gz`. All three carry their
+own Node.js runtime. The installer isn't code-signed yet, so SmartScreen asks once: *More info → Run anyway*.
+Settings (port, threads, GPU) are in `settings.json` in the install folder. If the port is taken by another program,
+Umbra PDF moves to the next free one (5181, 5182, ...).
+
+Build the packages yourself: `cd web && npm ci && npm run build:core && npm run build && node package/build.mjs`, then
+`iscc package/umbra-web.iss` ([Inno Setup](https://jrsoftware.org/isinfo.php)) for the installer. CI does this in
+`.github/workflows/web-app.yml`.
+
+**From source** (needs Node.js 20+). Windows: double-click `web\Umbra PDF.cmd` (installs and builds on first run). Or:
 ```
 cd web
 npm install             # once
@@ -70,7 +80,7 @@ npm run web             # builds core + server, starts, opens the browser
 npm start               # later runs (no rebuild)
 npm test                # server + desktop checks (Edge on Windows, or set CHROMIUM_PATH)
 ```
-Options: `--port 5180`, `--threads N` (CPU threads for OCR), `--gpu` (DirectML on Windows; falls back to the CPU),
+Options: `--port 5180` (next free port if taken), `--threads N` (CPU threads for OCR), `--gpu` (DirectML on Windows; falls back to the CPU),
 `--no-open`. Closing the server window stops it. The browser falls back to its own OCR engine if the server's can't run.
 
 ## Security model

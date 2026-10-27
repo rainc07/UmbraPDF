@@ -33,3 +33,5 @@ keystore.properties
 samples/for OCR.pdf
 /web/node_modules
 /web/dist
+/web/.cache
+/web/release
