@@ -31,7 +31,8 @@ const ctx = await browser.newContext({ viewport: { width: 412, height: 860 }, de
 const page = await ctx.newPage();
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
-await page.goto(`http://127.0.0.1:${server.address().port}/index.html`);
+// UMBRA_URL: run against another server, e.g. the desktop app's (web/).
+await page.goto(process.env.UMBRA_URL ?? `http://127.0.0.1:${server.address().port}/index.html`);
 await page.evaluate(async (a) => { await window.__umbraTest.load(new Uint8Array(a)); }, Array.from(pdf));
 await page.waitForTimeout(400);
 await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 }); // splash covers the app at start

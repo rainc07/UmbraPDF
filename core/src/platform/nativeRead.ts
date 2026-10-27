@@ -5,7 +5,7 @@ import type { PDFDocumentProxy } from '../engine/pdf';
 import { defaultOcrDpi, MIN_TEXT_CHARS, ocrScale } from '../engine/search';
 import { getOcrEngine, lastOcrStats, type OcrWord } from '../engine/ocr';
 import { wordsFromBlocks } from '../engine/ppocr';
-import type { PpLine } from '../engine/ppocr.worker';
+import type { PpLine } from '../engine/ppocr.pipeline';
 import type { NativeScan, ScanPage } from './host';
 
 /** Wording printed on MyKad-family cards (not "Malaysia" or "identity", which ordinary letters use too). */

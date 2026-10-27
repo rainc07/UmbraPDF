@@ -43,6 +43,7 @@ core/                     platform-agnostic web core (TypeScript, Vite)
   tests/e2e.mjs           Chromium end-to-end leak test
 app/                      Android shell (Kotlin, single WebView)
   src/main/assets/web/    built core (committed, so Android builds without Node)
+web/                      desktop web app: local server (127.0.0.1 only) + native OCR (ONNX Runtime for Node)
 ```
 
 ## Build
@@ -56,6 +57,21 @@ npm run build:android   # tsc + vite build + vendor copy + sync into app assets
 npm test                # E2E leak test (needs Chromium; set CHROMIUM_PATH)
 npm run dev             # browser dev server
 ```
+
+## Desktop web app (Windows, macOS, Linux)
+The same app in your browser, served from your own computer only (127.0.0.1). Text in scanned pages is read by
+ONNX Runtime for Node: the same PaddleOCR models and steps as Android, natively and multi-threaded. Needs Node.js 20+.
+
+Windows: double-click `web\Umbra PDF.cmd` (installs and builds on first run). Or:
+```
+cd web
+npm install             # once
+npm run web             # builds core + server, starts, opens the browser
+npm start               # later runs (no rebuild)
+npm test                # server + desktop checks (Edge on Windows, or set CHROMIUM_PATH)
+```
+Options: `--port 5180`, `--threads N` (CPU threads for OCR), `--gpu` (DirectML on Windows; falls back to the CPU),
+`--no-open`. Closing the server window stops it. The browser falls back to its own OCR engine if the server's can't run.
 
 ## Security model
 - **Network:** no INTERNET permission, so the OS blocks sockets. The WebView answers every request locally through WebViewAssetLoader or returns 403. The page also has a strict CSP (`default-src 'none'`).

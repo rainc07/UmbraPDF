@@ -28,7 +28,8 @@ const server = createServer(async (req, res) => {
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
 const page = await browser.newPage();
 page.on('pageerror', (e) => console.error('pageerror', String(e)));
-await page.goto(`http://127.0.0.1:${server.address().port}/index.html`);
+// UMBRA_URL: run against another server, e.g. the desktop app's (web/).
+await page.goto(process.env.UMBRA_URL ?? `http://127.0.0.1:${server.address().port}/index.html`);
 await page.waitForFunction(() => !!window.__umbraTest);
 
 const ALL = ['nric', 'phone', 'email', 'card', 'bank', 'passport', 'dob', 'company', 'tin', 'name', 'address'];

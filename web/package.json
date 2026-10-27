@@ -1,0 +1,24 @@
+{
+  "name": "umbra-web",
+  "version": "1.1.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "description": "Umbra PDF for the desktop: the web core served on this computer, with native OCR (ONNX Runtime for Node).",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build:core": "npm --prefix ../core run build",
+    "build": "tsc --noEmit && esbuild server/main.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/server.mjs --external:onnxruntime-node --log-level=warning",
+    "start": "node dist/server.mjs",
+    "web": "npm run build:core && npm run build && npm start",
+    "test": "node tests/server.mjs"
+  },
+  "dependencies": {
+    "onnxruntime-node": "1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.21",
+    "esbuild": "0.25.12",
+    "typescript": "5.8.3"
+  }
+}

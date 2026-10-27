@@ -1,6 +1,7 @@
 // Main-thread side of the PaddleOCR engine (see ppocr.worker.ts): page layout around ID cards, and conversion
 // of recognised lines into positioned words with per-character boxes (the shape the rest of the app uses).
-import type { PpLine, PpRec, PpRequest, PpResponse } from './ppocr.worker';
+import type { PpRequest, PpResponse } from './ppocr.worker';
+import { readStrips, type PpLine, type PpRec } from './ppocr.pipeline';
 import { findCards, contentGroups, warpQuad, inQuad, turnQuad, CARD_ASPECT, type Quad } from './cards';
 import { vendorUrl } from './paths';
 import type { OcrWord } from './ocr';
@@ -34,21 +35,29 @@ function spawn(): Engine {
   return { w, queue: Promise.resolve() };
 }
 
-// ---------- native engine (Android: window.UmbraOcr, see PpOcr.kt) ----------
-interface NativePort { postMessage(m: string | ArrayBuffer): void; onmessage: ((e: { data: string }) => void) | null }
+// ---------- native engine (Android: window.UmbraOcr, see PpOcr.kt; desktop: the local server, web/) ----------
+export interface NativePort { postMessage(m: string | ArrayBuffer): void; onmessage: ((e: { data: string }) => void) | null }
+export interface NativeOcr { port: NativePort; binary: boolean }
 type NativeReply = { id: number; ok: boolean; error?: string; lines?: PpLine[]; load?: number; threads?: number;
   ms?: { load: number; det: number; rec: number; retry: number; lines: number; threads: number; flipped: boolean } };
-let native: { port: NativePort; binary: boolean } | null = null;
+let native: NativeOcr | null = null;
 let nativeOff = false;
 const nativePending = new Map<number, (r: NativeReply) => void>();
+const onNativeReply = (e: { data: string }) => { const r = JSON.parse(e.data) as NativeReply; nativePending.get(r.id)?.(r); nativePending.delete(r.id); };
 
-function nativeCaps(): { port: NativePort; binary: boolean } | null {
+/** A native engine the host offers outside Android (asked once, when the engine first loads). */
+let offer: (() => Promise<NativeOcr | null>) | null = null;
+let offered: NativeOcr | null = null;
+export function offerNativeOcr(ask: () => Promise<NativeOcr | null>): void { offer = ask; }
+
+function nativeCaps(): NativeOcr | null {
+  if (offered) return offered;
   const w = window as unknown as { UmbraOcr?: NativePort; UmbraAndroid?: { ocrCaps?(): string } };
   if (!w.UmbraOcr || !w.UmbraAndroid?.ocrCaps) return null;
   try {
     const c = JSON.parse(w.UmbraAndroid.ocrCaps()) as { native: boolean; binary: boolean };
     if (!c.native) return null;
-    w.UmbraOcr.onmessage = (e) => { const r = JSON.parse(e.data) as NativeReply; nativePending.get(r.id)?.(r); nativePending.delete(r.id); };
+    w.UmbraOcr.onmessage = onNativeReply;
     return { port: w.UmbraOcr, binary: c.binary };
   } catch { return null; }
 }
@@ -74,19 +83,29 @@ async function nativeReadLines(c: HTMLCanvasElement, limit: number): Promise<PpL
   const r = await nativeCall(msg, id);
   if (!r.ok) throw new Error(r.error);
   const m = r.ms!;
-  ppStats.log.push(`${c.width}x${c.height} (det ${limit}, native ${m.threads} threads): ${Math.round(performance.now() - t0)} ms = det ${m.det} + rec ${m.rec} (${m.lines} lines) + retry ${m.retry}${m.flipped ? ', upside down' : ''}`);
+  ppStats.log.push(`${c.width}x${c.height} (det ${limit}, native ${m.threads ? `${m.threads} threads` : 'GPU'}): ${Math.round(performance.now() - t0)} ms = det ${m.det} + rec ${m.rec} (${m.lines} lines) + retry ${m.retry}${m.flipped ? ', upside down' : ''}`);
   return r.lines!;
 }
 
 /** Start loading the engine (models + runtime). Resolves false if it can't run here (then Tesseract is used). */
 export function ppocrReady(): Promise<boolean> {
   if (ready) return ready;
+  if (offer && !nativeOff) {
+    const ask = offer;
+    offer = null;
+    ready = ask().catch(() => null).then((n) => {
+      if (n) { n.port.onmessage = onNativeReply; offered = n; }
+      ready = null;
+      return ppocrReady();
+    });
+    return ready;
+  }
   native = nativeOff ? null : nativeCaps();
   if (native) {
     ready = (async () => {
       const t0 = performance.now(), id = ++seq;
       const r = await nativeCall(JSON.stringify({ id, kind: 'warm' }), id);
-      if (r.ok) { ppStats.log.push(`native engine load: ${Math.round(performance.now() - t0)} ms (${r.threads} threads)`); return true; }
+      if (r.ok) { ppStats.log.push(`native engine load: ${Math.round(performance.now() - t0)} ms (${r.threads ? `${r.threads} threads` : 'GPU'})`); return true; }
       console.warn('[umbra] native OCR failed to load', r.error);
       native = null; nativeOff = true; ready = null;
       return ppocrReady();
@@ -144,29 +163,10 @@ async function readLines(c: HTMLCanvasElement, limit: number): Promise<PpLine[]>
   ppStats.log.push(`getImageData ${c.width}x${c.height}: ${Math.round(t0 - tg)} ms`);
   const d = await call(engines[0], { kind: 'det', img, limit }, [img.data.buffer]);
   if (!d.ok) throw new Error(d.error);
-  const quads = d.quads!, strips = d.strips!, widths = d.widths!;
   const t1 = performance.now();
-  // Read everything as upright (the usual case). If most lines read poorly, the region is upside down:
-  // read it all again turned 180°. Otherwise retry just the few weak lines turned (mixed pages).
-  // (Only lines long enough to be real text count: short low-confidence boxes are specks and edges.)
-  let recs = await recogniseAll(strips, widths, false);
-  const long = widths.map((w, i) => (w >= 96 ? i : -1)).filter((i) => i >= 0);
-  let weak = long.filter((i) => recs[i].conf < 0.7);
-  const t2 = performance.now();
-  let flipAll = false;
-  if (long.length >= 3 && weak.length > long.length / 2) {
-    const again = await recogniseAll(strips, widths, true);
-    const mean = (r: PpRec[]) => long.reduce((a, i) => a + r[i].conf, 0) / long.length;
-    if (mean(again) > mean(recs) + 0.1) { recs = again; flipAll = true; quads.forEach((q, i) => { quads[i] = [2, 3, 0, 1].map((j) => q[j]); }); }
-    weak = [];
-  }
-  weak = weak.slice(0, 6);
-  if (weak.length) {
-    const again = await recogniseAll(weak.map((i) => strips[i]), weak.map((i) => widths[i]), true);
-    weak.forEach((i, k) => { if (again[k].conf > recs[i].conf + 0.1) { recs[i] = again[k]; quads[i] = [2, 3, 0, 1].map((j) => quads[i][j]); } });
-  }
-  ppStats.log.push(`${c.width}x${c.height} (det ${limit}): ${Math.round(performance.now() - t0)} ms = det ${Math.round(t1 - t0)} + rec ${Math.round(t2 - t1)} (${strips.length} lines, ${engines.length} engines) + retry ${Math.round(performance.now() - t2)} (${weak.length})${flipAll ? ', upside down' : ''}`);
-  return quads.map((quad, i) => ({ quad, ...recs[i] })).filter((l) => l.text.trim() && l.conf >= 0.5);
+  const r = await readStrips(d.quads!, d.strips!, d.widths!, recogniseAll);
+  ppStats.log.push(`${c.width}x${c.height} (det ${limit}): ${Math.round(performance.now() - t0)} ms = det ${Math.round(t1 - t0)} + rec ${Math.round(r.recMs)} (${d.strips!.length} lines, ${engines.length} engines) + retry ${Math.round(r.retryMs)} (${r.retried})${r.flipped ? ', upside down' : ''}`);
+  return r.lines;
 }
 
 type P = [number, number];

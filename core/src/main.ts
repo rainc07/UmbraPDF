@@ -634,7 +634,7 @@ function settingsDialog() {
     <h3>Appearance</h3>
     <div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div>
     <h3>Preferences</h3>
-    ${OPTION_ROWS.map(([k, t, h]) => `<label class="row2"><span>${t}<small class="hint">${h}</small></span>
+    ${OPTION_ROWS.filter(([k]) => k !== 'hideRecents' || host.name === 'android').map(([k, t, h]) => `<label class="row2"><span>${t}<small class="hint">${h}</small></span>
       <input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}></label>`).join('')}
     <h3>Advanced</h3>
     <label class="row2"><span>Show technical check report<small class="hint">For IT and troubleshooting. The safety check always runs either way.</small></span>
@@ -1408,6 +1408,10 @@ host.onExternalOpen((f) => {
   if (S.doc && S.dirty && prefs.opts.confirmLeave) confirmLeave(() => void loadFile(f)); else void loadFile(f);
 });
 host.onBack(handleBack);
+// Desktop browsers: a PDF can also be dropped on the window (see platform/browser.ts).
+if (host.name === 'browser') $('#btn-open-2').insertAdjacentHTML('afterend', '<p class="drop-hint">or drop a PDF anywhere in this window</p>');
+// Closing the browser tab with redactions not exported yet: the browser asks first (like "Leave this document?").
+window.addEventListener('beforeunload', (e) => { if (S.doc && S.dirty && prefs.opts.confirmLeave) e.preventDefault(); });
 syncToolbar();
 
 // The app crashed last time: show what happened once, so it can be copied into a bug report.

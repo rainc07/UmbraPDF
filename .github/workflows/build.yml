@@ -27,7 +27,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: core/package-lock.json
+          cache-dependency-path: |
+            core/package-lock.json
+            web/package-lock.json
       - name: Install
         working-directory: core
         run: npm ci
@@ -45,11 +47,23 @@ jobs:
         run: |
           set -o pipefail
           CHROMIUM_PATH="$(command -v google-chrome || command -v chromium)" npm test 2>&1 | tee test.log
+      - name: Desktop web app (server with native OCR)
+        working-directory: web
+        run: |
+          set -o pipefail
+          export CHROMIUM_PATH="$(command -v google-chrome || command -v chromium)"
+          npm ci
+          npm run build
+          npm test 2>&1 | tee ../core/test-web.log
+          # ID-card bench again, read by the server's native engine (same recall floors as the browser engine).
+          node dist/server.mjs --no-open --port 5180 &
+          sleep 3
+          cd ../core && UMBRA_URL=http://127.0.0.1:5180/ node tests/bench-cards.mjs --assert 2>&1 | tee -a test-web.log
       - name: Report failed checks
         if: failure()
         working-directory: core
         run: |
-          grep -E '^(FAIL|INFO)|Error|error' test.log | head -40 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+          cat test.log test-web.log 2>/dev/null | grep -E '^(FAIL|INFO)|Error|error' | head -40 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
 
 
   smoke:

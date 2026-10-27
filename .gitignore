@@ -31,3 +31,5 @@ keystore.properties
 
 # Third-party scan, not redistributable
 samples/for OCR.pdf
+/web/node_modules
+/web/dist

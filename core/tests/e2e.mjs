@@ -39,8 +39,9 @@ const server = createServer(async (req, res) => {
   try {
     const path = resolve(root, '.' + decodeURIComponent(new URL(req.url, 'http://x').pathname).replace(/\/$/, '/index.html'));
     if (!path.startsWith(root)) throw 0;
+    const body = await readFile(path); // before the headers: a missing file (e.g. api/caps) answers 404
     res.writeHead(200, { 'content-type': MIME[extname(path)] ?? 'application/octet-stream' });
-    res.end(await readFile(path));
+    res.end(body);
   } catch { res.writeHead(404); res.end(); }
 }).listen(0);
 const port = server.address().port;
@@ -57,7 +58,8 @@ const consoleErrors = [];
 page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
 page.on('pageerror', (e) => consoleErrors.push(String(e)));
 
-await page.goto(`http://127.0.0.1:${port}/index.html`);
+// UMBRA_URL: run against another server, e.g. the desktop app's (web/).
+await page.goto(process.env.UMBRA_URL ?? `http://127.0.0.1:${port}/index.html`);
 const fixture = await makeFixture();
 
 const result = await page.evaluate(async (arr) => {
