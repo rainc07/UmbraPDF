@@ -45,9 +45,9 @@ rmSync(out, { recursive: true, force: true });
 mkdirSync(resolve(out, 'node'), { recursive: true });
 const unpacked = resolve(cache, t.archive.replace(/\.(zip|tar\.xz)$/, ''));
 if (!existsSync(resolve(unpacked, t.bin))) {
-  // Windows' tar (bsdtar) reads zip; on Linux use unzip for the Windows zip.
+  // Windows' own tar (bsdtar) reads zip; Git Bash's GNU tar would take "D:\..." for a remote host. Linux: unzip.
   if (t.archive.endsWith('.zip') && process.platform !== 'win32') execFileSync('unzip', ['-q', '-o', archive, '-d', cache]);
-  else execFileSync('tar', ['-xf', archive, '-C', cache]);
+  else execFileSync(process.platform === 'win32' ? resolve(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar', ['-xf', archive, '-C', cache]);
 }
 cpSync(resolve(unpacked, t.bin), resolve(out, 'node', win ? 'node.exe' : 'node'));
 cpSync(resolve(unpacked, 'LICENSE'), resolve(out, 'node', 'LICENSE'));
