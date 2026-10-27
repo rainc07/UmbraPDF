@@ -291,6 +291,8 @@ const p2 = await page.evaluate(async ({ text, scan, presets, custom, partial }) 
   const sc = await T.export({ dpi: 200, searchable: true }, true);
   out.scanReport = sc.report;
   out.scanLayer = await T.text(sc.bytes);
+  out.scanRaw = await T.text(sc.bytes, true);
+  out.scanBytes = Array.from(sc.bytes);
   out.scanWords = sc.ocrWords;
   const t6 = performance.now();
   const s6 = await T.export({ dpi: 600, searchable: true }, false); // OCR runs on a 300 DPI copy
@@ -332,6 +334,23 @@ check(p2.scanReport.ok && p2.scanReport.ocr?.leaks.length === 0, `detect (scanne
 const sLeaked = SCAN_LINES.map((x) => x[1]).filter((v) => p2.scanLayer.replace(/\s/g, '').includes(v.replace(/\s/g, '')));
 check(sLeaked.length === 0 && /Public/.test(p2.scanLayer), `detect (scanned): PII absent from OCR text layer, public text kept (${p2.scanWords} words)`);
 check(/stays\s*vi/.test(p2.scanLayer) && !/visible/.test(p2.scanLayer), `searchable: visible part of a partly redacted word is kept ("${(p2.scanLayer.match(/stays\s*\S*/) || [''])[0]}")`);
+check(/Public line stays/.test(p2.scanRaw), `searchable: real spaces between OCR words, phrase search works ("${(p2.scanRaw.match(/Public[^\n]*/) || [''])[0]}")`);
+{
+  // Every font the text layer names must be in the page's resources (a stray '/' once broke this).
+  const d = await PDFDocument.load(new Uint8Array(p2.scanBytes));
+  const bad = [];
+  for (const pg of d.getPages()) {
+    const fonts = pg.node.Resources()?.lookupMaybe(PDFName.of('Font'), PDFDict);
+    const have = new Set((fonts?.keys() ?? []).map((k) => k.asString()));
+    const c = pg.node.Contents();
+    const streams = c instanceof PDFStream ? [c] : (c?.asArray() ?? []).map((r) => d.context.lookup(r));
+    for (const st of streams) {
+      const src = new TextDecoder('latin1').decode(st instanceof PDFRawStream ? decodePDFRawStream(st).decode() : st.getContents());
+      for (const [, n] of src.matchAll(/(\/[^\s/\[\]()<>]+)\s+[\d.]+\s+Tf/g)) if (!have.has(n)) bad.push(n);
+    }
+  }
+  check(bad.length === 0, `searchable: text layer fonts resolve${bad.length ? ` (missing ${[...new Set(bad)].join(', ')})` : ''}`);
+}
 check(p2.ok600 && /Public/.test(p2.layer600) && !/850505|ahmad@|H87654321/.test(p2.layer600), `600 DPI searchable export: verified, text layer correct (${p2.ms600} ms)`);
 if (failed) console.log('debug hits:', JSON.stringify({ text: p2.textHits.map((h) => [h.label, h.text]), scan: p2.scanHits.map((h) => [h.label, h.text]) }));
 

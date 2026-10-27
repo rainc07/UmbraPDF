@@ -1452,12 +1452,14 @@ syncToolbar();
   toggleApplied: (id: number, on: boolean) => toggleApplied(id, on),
   verify: (bytes: Uint8Array, boxes?: Rect[][]) =>
     verifyOutput(bytes, () => {}, boxes ? { searchable: true, redactions: boxes } : undefined),
-  text: async (bytes: Uint8Array) => {
+  // raw: only the file's own spaces, a new line where pdf.js ends one (what a reader's search sees).
+  text: async (bytes: Uint8Array, raw = false) => {
     const d = await openPdf(bytes);
     let t = '';
     for (let i = 1; i <= d.numPages; i++) {
       const tc = await (await d.getPage(i)).getTextContent();
-      t += tc.items.map((it) => ('str' in it ? it.str : '')).join(' ') + '\n';
+      t += raw ? tc.items.map((it) => ('str' in it ? it.str + (it.hasEOL ? '\n' : '') : '')).join('')
+        : tc.items.map((it) => ('str' in it ? it.str : '')).join(' ') + '\n';
     }
     await closePdf(d);
     return t;

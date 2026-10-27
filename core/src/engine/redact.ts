@@ -73,7 +73,6 @@ function addTextLayer(
   pxW: number, pxH: number, ptW: number, ptH: number,
 ): void {
   const sx = ptW / pxW, sy = ptH / pxH;
-  const space = font.encodeText(' '), spaceEm = font.widthOfTextAtSize(' ', 1);
   const median = (v: number[]) => [...v].sort((a, b) => a - b)[v.length >> 1];
   const ops = [beginText(), setTextRenderingMode(TextRenderingMode.Invisible)];
   for (let i0 = 0; i0 < words.length;) {
@@ -87,34 +86,53 @@ function addTextLayer(
     const sxx = ws.reduce((a, q) => a + (q.cx - mx) ** 2, 0), sxy = ws.reduce((a, q) => a + (q.cx - mx) * (q.cy - my), 0);
     const along = n > 1 && sxx > 0 && median(ws.map((q) => q.bw / Math.max(1, q.bh))) > 0.5;
     const th = along ? Math.max(-0.5, Math.min(0.5, Math.atan(sxy / sxx))) : 0;
-    const c = Math.cos(th), s = Math.sin(th);
+    // Below 2° the words are written upright (still on the fitted line): readers join slightly rotated words
+    // poorly (pdf.js breaks the line, poppler staircases it), and such small tilts are mostly OCR box noise.
+    const turn = Math.abs(th) >= 0.035, c = turn ? Math.cos(th) : 1, s = turn ? Math.sin(th) : 0;
     // Line height across the baseline, and each word's length along it (its upright box minus the tilt).
     const H = along ? median(ws.map((q) => Math.max(0.3 * q.bh, (q.bh - q.bw * Math.abs(s)) / c))) : 0;
     const placed = ws.map((q) => {
       const h = along ? H : q.bh, L = along ? Math.max(1, (q.bw - H * Math.abs(s)) / c) : q.bw;
       const cy = along ? my + Math.tan(th) * (q.cx - mx) : q.cy; // centre on the fitted line
       const u = q.cx * c + cy * s; // position along the baseline
-      return { ...q, h, L, cy, u0: u - L / 2, u1: u + L / 2 };
+      return { ...q, h, cy, u, u0: u - L / 2, u1: u + L / 2 };
     });
+    // A turned line gets one squeeze for all its words (pdf.js compares positions along a turned line in units
+    // scaled by the squeeze, so a different squeeze per word breaks the line up). It's the tightest fit, so no
+    // word with its space runs into the next one: readers lose a space where the next word starts too early.
+    const fits = placed.map((q, k) => {
+      const next = placed[k + 1], span = next ? next.u0 - q.u0 : 0;
+      const [len, text] = span > 0 ? [span, `${q.text} `] : [q.u1 - q.u0, q.text];
+      return ((len * sx) / Math.max(1e-6, font.widthOfTextAtSize(text, q.h * sy))) * 100;
+    });
+    const lineTz = turn ? Math.max(0.3 * median(fits), Math.min(...fits)) : 0;
     placed.forEach((q, k) => {
-      const size = q.h * sy, natural = font.widthOfTextAtSize(q.text, size);
-      if (size <= 0 || natural <= 0) return;
+      const size = q.h * sy;
+      if (size <= 0) return;
+      // Every word but the line's last ends with a space, in the same string (readers skip a space shown on its own).
+      // When nothing (no box, no column gap) lies between it and the next word, word + space span exactly up to
+      // the next word: the text then runs on as one line, and the space opens a real gap between the words, which
+      // readers that place spaces by gaps (poppler) need. Otherwise the word fits its own box and the space follows.
+      const next = placed[k + 1];
+      const text = next ? `${q.text} ` : q.text;
+      let L = q.u1 - q.u0, natural = font.widthOfTextAtSize(q.text, size);
+      if (next) {
+        const m = Math.max(2, q.h * 0.08), gx0 = Math.min(q.w.x1, next.w.x0), gx1 = Math.max(q.w.x1, next.w.x0);
+        const y0 = Math.min(q.w.y0, next.w.y0) - m, y1 = Math.max(q.w.y1, next.w.y1) + m;
+        const span = next.u0 - q.u0;
+        if (span > 0 && next.u0 - q.u1 < 3 * q.h && !boxesPx.some((b) => intersects([gx0, y0, gx1 - gx0, y1 - y0], b))) {
+          L = span; natural = font.widthOfTextAtSize(text, size);
+        }
+      }
+      if (natural <= 0 || L <= 0) return;
       // Start of the word on its baseline (0.3 of the line height below the centre line), in page points.
-      const bx = q.cx - (q.L / 2) * c - 0.3 * q.h * s, by = q.cy - (q.L / 2) * s + 0.3 * q.h * c;
+      const d = q.u0 - q.u, bx = q.cx + d * c - 0.3 * q.h * s, by = q.cy + d * s + 0.3 * q.h * c;
       ops.push(
         setFontAndSize(fontName, size),
-        setCharacterSqueeze(((q.L * sx) / natural) * 100),
+        setCharacterSqueeze(turn ? lineTz : ((L * sx) / natural) * 100),
         setTextMatrix(c, -s, s, c, bx * sx, ptH - by * sy),
-        showText(font.encodeText(q.text)),
+        showText(font.encodeText(text)),
       );
-      // A space after every word but the line's last. It fills the gap to the next word when the gap is free of
-      // boxes (and not a column gap); otherwise it's a hairline at the word's end, so text never reaches a box.
-      const next = placed[k + 1];
-      if (!next) return;
-      const gap = next.u0 - q.u1, m = Math.max(2, q.h * 0.08);
-      const gx0 = Math.min(q.w.x1, next.w.x0), gx1 = Math.max(q.w.x1, next.w.x0);
-      const clear = gap > 0 && gap < 3 * q.h && !boxesPx.some((b) => intersects([gx0, Math.min(q.w.y0, next.w.y0) - m, gx1 - gx0, Math.max(q.w.y1, next.w.y1) - Math.min(q.w.y0, next.w.y0) + 2 * m], b));
-      ops.push(setCharacterSqueeze(clear ? ((gap * sx) / (spaceEm * size)) * 100 : 1), showText(space));
     });
   }
   ops.push(endText());
