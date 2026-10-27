@@ -333,7 +333,7 @@ for (const e of scanFx.expected) check(covers(p2.scanHits, e, 1.5), `detect (sca
 check(p2.scanReport.ok && p2.scanReport.ocr?.leaks.length === 0, `detect (scanned): export verified clean: ${p2.scanReport.issues.join('; ') || 'no issues'}`);
 const sLeaked = SCAN_LINES.map((x) => x[1]).filter((v) => p2.scanLayer.replace(/\s/g, '').includes(v.replace(/\s/g, '')));
 check(sLeaked.length === 0 && /Public/.test(p2.scanLayer), `detect (scanned): PII absent from OCR text layer, public text kept (${p2.scanWords} words)`);
-check(/stays\s*vi/.test(p2.scanLayer) && !/visible/.test(p2.scanLayer), `searchable: visible part of a partly redacted word is kept ("${(p2.scanLayer.match(/stays\s*\S*/) || [''])[0]}")`);
+check(/stays\s*v/.test(p2.scanLayer) && !/visible/.test(p2.scanLayer), `searchable: visible part of a partly redacted word is kept ("${(p2.scanLayer.match(/stays\s*\S*/) || [''])[0]}")`);
 check(/Public line stays/.test(p2.scanRaw), `searchable: real spaces between OCR words, phrase search works ("${(p2.scanRaw.match(/Public[^\n]*/) || [''])[0]}")`);
 {
   // Every font the text layer names must be in the page's resources (a stray '/' once broke this).
@@ -486,6 +486,46 @@ check(V.size < V.imgSize / 3, `vector: much smaller than image export (${(V.size
   check(/123-45-6789/.test(V.text), 'vector: visible (unredacted) form value is kept as page text, the form itself is removed');
   check(od.getTitle() === undefined && od.getAuthor() === undefined, 'vector: no Title/Author');
 }
+
+// ---------------- "Keep original text": shapes under a box, hidden text next to a box ----------------
+// "PUBLIC SECRET 42" drawn as one filled path (text converted to outlines, DejaVu Sans Bold 28 pt).
+const OUTLINED = 'M2.6 0L2.6-20.4L11.3-20.4Q15.2-20.4 17.3-18.7Q19.4-17 19.4-13.8L19.4-13.8Q19.4-10.5 17.3-8.8Q15.2-7.1 11.3-7.1L11.3-7.1L7.8-7.1L7.8 0L2.6 0ZM10.7-16.6L7.8-16.6L7.8-10.9L10.7-10.9Q12.3-10.9 13.1-11.6Q13.9-12.4 13.9-13.8L13.9-13.8Q13.9-15.1 13.1-15.9Q12.3-16.6 10.7-16.6L10.7-16.6ZM23.1-8.2L23.1-20.4L28.4-20.4L28.4-8.2Q28.4-5.6 29.2-4.6Q30-3.5 31.9-3.5L31.9-3.5Q33.8-3.5 34.6-4.6Q35.4-5.6 35.4-8.2L35.4-8.2L35.4-20.4L40.7-20.4L40.7-8.2Q40.7-3.8 38.5-1.7Q36.3 0.4 31.9 0.4L31.9 0.4Q27.4 0.4 25.3-1.7Q23.1-3.8 23.1-8.2L23.1-8.2ZM51.1-12.5L54-12.5Q55.2-12.5 55.9-13.1Q56.5-13.6 56.5-14.7L56.5-14.7Q56.5-15.7 55.9-16.3Q55.2-16.8 54-16.8L54-16.8L51.1-16.8L51.1-12.5ZM51.1-3.6L54.2-3.6Q55.8-3.6 56.6-4.3Q57.4-4.9 57.4-6.3L57.4-6.3Q57.4-7.6 56.6-8.3Q55.8-8.9 54.2-8.9L54.2-8.9L51.1-8.9L51.1-3.6ZM59.1-10.9L59.1-10.9Q60.8-10.4 61.7-9.1Q62.6-7.8 62.6-5.9L62.6-5.9Q62.6-2.9 60.6-1.4Q58.6 0 54.6 0L54.6 0L45.8 0L45.8-20.4L53.7-20.4Q58-20.4 59.9-19.1Q61.8-17.8 61.8-15L61.8-15Q61.8-13.5 61.1-12.5Q60.4-11.4 59.1-10.9ZM67.2 0L67.2-20.4L72.4-20.4L72.4-4L81.7-4L81.7 0L67.2 0ZM85 0L85-20.4L90.3-20.4L90.3 0L85 0ZM111.6-5.3L111.6-1.1Q110.2-0.4 108.6 0Q107 0.4 105.3 0.4L105.3 0.4Q100.2 0.4 97.2-2.5Q94.3-5.3 94.3-10.2L94.3-10.2Q94.3-15.1 97.2-17.9Q100.2-20.8 105.3-20.8L105.3-20.8Q107-20.8 108.6-20.4Q110.2-20 111.6-19.3L111.6-19.3L111.6-15Q110.2-16 108.7-16.5Q107.3-17 105.7-17L105.7-17Q102.9-17 101.3-15.2Q99.7-13.4 99.7-10.2L99.7-10.2Q99.7-7 101.3-5.2Q102.9-3.4 105.7-3.4L105.7-3.4Q107.3-3.4 108.7-3.9Q110.2-4.3 111.6-5.3L111.6-5.3ZM139.9-19.8L139.9-19.8L139.9-15.4Q138.3-16.2 136.7-16.6Q135.1-17 133.6-17L133.6-17Q131.7-17 130.8-16.4Q129.9-15.9 129.9-14.8L129.9-14.8Q129.9-14 130.5-13.6Q131.2-13.1 132.8-12.8L132.8-12.8L135-12.3Q138.4-11.6 139.8-10.2Q141.3-8.8 141.3-6.3L141.3-6.3Q141.3-2.9 139.3-1.3Q137.3 0.4 133.2 0.4L133.2 0.4Q131.2 0.4 129.3 0Q127.3-0.3 125.3-1.1L125.3-1.1L125.3-5.5Q127.3-4.5 129.1-3.9Q130.9-3.4 132.6-3.4L132.6-3.4Q134.4-3.4 135.3-4Q136.2-4.6 136.2-5.6L136.2-5.6Q136.2-6.6 135.6-7.1Q135-7.6 133.1-8L133.1-8L131.1-8.5Q128-9.1 126.6-10.6Q125.2-12 125.2-14.5L125.2-14.5Q125.2-17.5 127.1-19.1Q129.1-20.8 132.8-20.8L132.8-20.8Q134.5-20.8 136.3-20.5Q138-20.3 139.9-19.8ZM145.9 0L145.9-20.4L160.1-20.4L160.1-16.4L151.2-16.4L151.2-12.6L159.6-12.6L159.6-8.7L151.2-8.7L151.2-4L160.4-4L160.4 0L145.9 0ZM181.2-5.3L181.2-1.1Q179.8-0.4 178.2 0Q176.6 0.4 174.9 0.4L174.9 0.4Q169.8 0.4 166.8-2.5Q163.8-5.3 163.8-10.2L163.8-10.2Q163.8-15.1 166.8-17.9Q169.8-20.8 174.9-20.8L174.9-20.8Q176.6-20.8 178.2-20.4Q179.8-20 181.2-19.3L181.2-19.3L181.2-15Q179.7-16 178.3-16.5Q176.9-17 175.3-17L175.3-17Q172.5-17 170.9-15.2Q169.3-13.4 169.3-10.2L169.3-10.2Q169.3-7 170.9-5.2Q172.5-3.4 175.3-3.4L175.3-3.4Q176.9-3.4 178.3-3.9Q179.7-4.3 181.2-5.3L181.2-5.3ZM190.8-11.4L193-11.4Q194.7-11.4 195.4-12Q196.1-12.6 196.1-14L196.1-14Q196.1-15.4 195.4-16Q194.7-16.6 193-16.6L193-16.6L190.8-16.6L190.8-11.4ZM192.3-7.7L190.8-7.7L190.8 0L185.6 0L185.6-20.4L193.6-20.4Q197.6-20.4 199.5-19.1Q201.4-17.7 201.4-14.8L201.4-14.8Q201.4-12.8 200.4-11.5Q199.4-10.2 197.5-9.5L197.5-9.5Q198.6-9.3 199.4-8.4Q200.3-7.6 201.1-5.8L201.1-5.8L204 0L198.4 0L195.9-5.1Q195.2-6.6 194.4-7.2Q193.6-7.7 192.3-7.7L192.3-7.7ZM207.1 0L207.1-20.4L221.3-20.4L221.3-16.4L212.4-16.4L212.4-12.6L220.8-12.6L220.8-8.7L212.4-8.7L212.4-4L221.6-4L221.6 0L207.1 0ZM223.8-16.4L223.8-20.4L242.6-20.4L242.6-16.4L235.9-16.4L235.9 0L230.6 0L230.6-16.4L223.8-16.4ZM262.8-7.5L262.8-16.1L257.1-7.5L262.8-7.5ZM253.8-8.2L262-20.4L267.8-20.4L267.8-7.5L270.7-7.5L270.7-3.7L267.8-3.7L267.8 0L262.8 0L262.8-3.7L253.8-3.7L253.8-8.2ZM284.4-7.7L280.1-3.9L289.1-3.9L289.1 0L274.2 0L274.2-3.9L281.7-10.4Q282.7-11.3 283.2-12.2Q283.6-13.1 283.6-14L283.6-14Q283.6-15.4 282.7-16.3Q281.7-17.2 280.1-17.2L280.1-17.2Q278.9-17.2 277.4-16.7Q276-16.1 274.3-15.1L274.3-15.1L274.3-19.6Q276.1-20.2 277.8-20.5Q279.5-20.8 281.2-20.8L281.2-20.8Q284.9-20.8 286.9-19.2Q288.9-17.6 288.9-14.7L288.9-14.7Q288.9-13 288.1-11.6Q287.2-10.1 284.4-7.7L284.4-7.7Z';
+const outlineDoc = await (async () => {
+  const d = await PDFDocument.create(); const p = d.addPage([612, 400]);
+  p.drawSvgPath(OUTLINED, { x: 72, y: 200 });
+  return d.save();
+})();
+const hiddenDoc = await (async () => {
+  const d = await PDFDocument.create(); const p = d.addPage([612, 400]);
+  const font = await d.embedFont(StandardFonts.Helvetica);
+  p.drawText('Name: TAN AH KOW', { x: 72, y: 300, size: 18, font });
+  // An OCR-style invisible copy that doesn't line up with the visible line (40 pt lower)
+  const f = p.node.newFontDictionary('FH', font.ref);
+  p.pushOperators(pushGraphicsState(), beginText(), setFontAndSize(f, 18), setTextRenderingMode(TextRenderingMode.Invisible),
+    moveText(72, 260), showText(font.encodeText('Name: TAN AH KOW')), endText(), popGraphicsState());
+  return d.save();
+})();
+const SH = await page.evaluate(async ([outl, hid]) => {
+  const T = window.__umbraTest;
+  await T.load(new Uint8Array(outl));
+  const H = T.sizes()[0].height;
+  T.setBoxes([[{ x: 186, y: H - 228, w: 186, h: 34 }]]); // over "SECRET 42" only
+  const vec = await T.export({}, false, 'vector');
+  const img = await T.export({ dpi: 200 }, false, 'image');
+  await T.load(new Uint8Array(hid));
+  const H2 = T.sizes()[0].height;
+  T.setBoxes([[{ x: 70, y: H2 - 322, w: 200, h: 28 }]]); // over the visible line only
+  let hidden;
+  try { await T.export({}, false, 'vector'); hidden = 'exported'; } catch (e) { hidden = `${e.name}: ${e.message}`; }
+  T.setBoxes([[{ x: 70, y: H2 - 322, w: 200, h: 28 }, { x: 70, y: H2 - 282, w: 200, h: 28 }]]); // both lines boxed
+  const both = await T.export({}, false, 'vector');
+  return { vec: vec.report, img: img.report, hidden, both: both.report };
+}, [Array.from(outlineDoc), Array.from(hiddenDoc)]);
+check(!SH.vec.ok && SH.vec.issues.some((i) => /under 1 box/.test(i)),
+  `vector: outlined text left under a box is caught, nothing saved (${SH.vec.issues.join('; ').slice(0, 140)}; OCR "${SH.vec.ocr?.leaks.map((l) => l.text).join('|')}")`);
+check(SH.img.ok, `vector: same file exports fine as Image only (${SH.img.issues.join('; ') || 'no issues'})`);
+check(/HiddenTextError/.test(SH.hidden), `vector: invisible text not lined up with the boxes is refused ("${SH.hidden}")`);
+check(SH.both.ok, `vector: invisible text fully under boxes is removed and exports (${SH.both.issues.join('; ') || 'no issues'})`);
 
 // ---------------- 1.1: TIN, stronger Name / Account No., tables, ID cards ----------------
 {

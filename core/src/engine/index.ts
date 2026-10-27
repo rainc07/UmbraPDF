@@ -11,4 +11,4 @@ export {
 export type { PageText, TextMatch, SearchPattern, Hit, ExtractOptions } from './search';
 export { PRESETS, DEFAULT_PRESET_IDS, buildPatterns, compileCustom, luhn, normAlways, ALWAYS_LABEL, ALWAYS_MAX } from './detect';
 export type { Preset, CustomPattern, DetectOptions } from './detect';
-export { exportVector, loadMuPdf, stripMarkedContentText } from './vector';
+export { exportVector, loadMuPdf, stripMarkedContentText, HiddenLayersError, HiddenTextError } from './vector';

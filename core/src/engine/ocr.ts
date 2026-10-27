@@ -107,6 +107,16 @@ function darkShare(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   return dark / (d.length / 4);
 }
 
+/** True if the region (inset by `inset` px) has no ink at all: nothing there to read. */
+function blank(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, inset: number): boolean {
+  const x0 = Math.max(0, Math.ceil(x + inset)), y0 = Math.max(0, Math.ceil(y + inset));
+  const x1 = Math.min(ctx.canvas.width, Math.floor(x + w - inset)), y1 = Math.min(ctx.canvas.height, Math.floor(y + h - inset));
+  if (x1 - x0 < 1 || y1 - y0 < 1) return true;
+  const d = ctx.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+  for (let k = 0; k < d.length; k += 4) if (d[k] * 0.299 + d[k + 1] * 0.587 + d[k + 2] * 0.114 < 200) return false;
+  return true;
+}
+
 /** A region this dark (after the anti-aliased edge is trimmed) is a solid box: no readable text is possible. */
 const SOLID = 0.995;
 
@@ -139,6 +149,7 @@ export async function ocrRedactedRegions(
         checkedRegions++;
         const share = darkShare(ctx, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 2);
         if (share === null || share >= SOLID) { solidRegions++; continue; } // too thin to hold text, or solid
+        if (blank(ctx, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 2)) { solidRegions++; continue; } // empty (no-box copy)
         onProgress(`OCR check page ${i + 1}`, i / pages);
         const crop = document.createElement('canvas');
         crop.width = Math.max(8, Math.round(r.w * scale));

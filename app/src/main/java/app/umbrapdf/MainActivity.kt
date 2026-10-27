@@ -129,7 +129,7 @@ class MainActivity : ComponentActivity() {
                 val h = ByteBuffer.wrap(bin, 0, 16).order(ByteOrder.LITTLE_ENDIAN)
                 id = h.int
                 val w = h.int; val hh = h.int; val limit = h.int
-                require(bin.size >= 16 + w * hh * 4) { "short image" }
+                require(w > 0 && hh > 0 && bin.size.toLong() >= 16L + w.toLong() * hh * 4) { "bad image size" }
                 ocr.run(id, w, hh, limit, bin, 16)
             } else {
                 val j = JSONObject(str ?: "{}")

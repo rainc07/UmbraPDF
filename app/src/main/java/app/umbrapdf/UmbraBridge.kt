@@ -84,10 +84,10 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
     @JavascriptInterface
     fun setSecure(on: Boolean) = activity.runOnUiThread { activity.applySecure(on) }
 
-    /** Saved "Hide content in Recent apps" choice, read natively so it applies before the first frame. */
+    /** Saved "Hide content in Recent apps" choice (on unless turned off), read natively so it applies before the first frame. */
     fun savedHideRecents(): Boolean = try {
-        org.json.JSONObject(getPrefs().ifEmpty { "{}" }).optJSONObject("opts")?.optBoolean("hideRecents", false) ?: false
-    } catch (e: Exception) { false }
+        org.json.JSONObject(getPrefs().ifEmpty { "{}" }).optJSONObject("opts")?.optBoolean("hideRecents", true) ?: true
+    } catch (e: Exception) { true }
 
     /** Stack trace of the last crash, if any (shown once so the user can copy it into a bug report). */
     @JavascriptInterface

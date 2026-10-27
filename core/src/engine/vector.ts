@@ -26,6 +26,46 @@ export class HiddenLayersError extends Error {
   constructor() { super('This PDF has hidden layers. Use "Image only" to export it safely.'); this.name = 'HiddenLayersError'; }
 }
 
+export class HiddenTextError extends Error {
+  constructor(readonly pages: number[]) {
+    super(`Page ${pages.join(', ')} has text you can't see next to your boxes. Use "Image only" to export it safely.`);
+    this.name = 'HiddenTextError';
+  }
+}
+
+type Box4 = [number, number, number, number];
+/**
+ * Does the page still hold text nobody sees: invisible (render mode 3, or 7 clipping only), fully transparent, or
+ * outside the page? Such text (often an OCR layer) need not line up with what the user saw and boxed.
+ */
+function hasHiddenText(m: MuPdf, page: import('mupdf').PDFPage): boolean {
+  const [px0, py0, px1, py1] = page.getBounds();
+  const T = 2; // pt of slack at the page edge
+  const outside = (b: Box4) => b[0] < px0 - T || b[1] < py0 - T || b[2] > px1 + T || b[3] > py1 + T;
+  const same = (a: Box4, b: Box4) => a.every((v, k) => Math.abs(v - b[k]) < 1);
+  const shown: Box4[] = [], clipped: Box4[] = [];
+  let hidden = false;
+  const drawn = (t: import('mupdf').Text, ctm: import('mupdf').Matrix, alpha: number) => {
+    const b = t.getBounds(null as never, ctm) as Box4;
+    if (alpha < 0.05 || outside(b)) hidden = true; else shown.push(b);
+  };
+  const dev = new m.Device({
+    fillText: (t, ctm, _cs, _c, alpha) => drawn(t, ctm, alpha),
+    strokeText: (t, _s, ctm, _cs, _c, alpha) => drawn(t, ctm, alpha),
+    ignoreText: () => { hidden = true; },
+    clipText: (t, ctm) => { clipped.push(t.getBounds(null as never, ctm) as Box4); },
+    clipStrokeText: (t, _s, ctm) => { clipped.push(t.getBounds(null as never, ctm) as Box4); },
+  });
+  try {
+    page.runPageContents(dev, m.Matrix.identity);
+    dev.close();
+  } finally {
+    dev.destroy();
+  }
+  // Clipping text that was also painted is render mode 4-6; on its own it is mode 7 (invisible).
+  return hidden || clipped.some((c) => !shown.some((s) => same(c, s)));
+}
+
 export interface VectorOptions {
   /** Draw black boxes (default). Off only in tests, to inspect what is left under the boxes. */
   blackBoxes?: boolean;
@@ -50,6 +90,7 @@ export async function exportVector(
     // Form fields and annotation appearances become page content first, so boxes over them redact them too.
     doc.bake(true, true);
     const n = doc.countPages();
+    const hiddenPages: number[] = [];
     for (let i = 0; i < n; i++) {
       onProgress(`Redacting page ${i + 1}/${n}`, (i / n) * 0.8);
       const page = doc.loadPage(i) as import('mupdf').PDFPage;
@@ -66,6 +107,8 @@ export async function exportVector(
           m.PDFPage.REDACT_LINE_ART_REMOVE_IF_COVERED, // drop vector shapes fully under a box
           m.PDFPage.REDACT_TEXT_REMOVE,               // drop every glyph touching a box
         );
+        // Hidden text left on a page with boxes may be a copy of what was boxed, just not lined up with it.
+        if (hasHiddenText(m, page)) hiddenPages.push(i + 1);
       }
       for (const a of page.getAnnotations()) page.deleteAnnotation(a);
       for (const w of page.getWidgets()) page.deleteAnnotation(w);
@@ -73,6 +116,7 @@ export async function exportVector(
       for (const k of PAGE_STRIP) po.delete(k);
       page.destroy();
     }
+    if (hiddenPages.length) throw new HiddenTextError(hiddenPages);
     const trailer = doc.getTrailer();
     const root = trailer.get('Root');
     for (const k of CATALOG_STRIP) root.delete(k);

@@ -558,7 +558,7 @@ function bindOverlay(ov: HTMLElement, page: number) {
 type ThemePref = 'system' | 'light' | 'dark';
 interface ExportPrefs { dpi: number; format: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
 interface Options { hideRecents: boolean; platesLabelled: boolean; confirmLeave: boolean; closeAfterRedact: boolean; reviewReminder: boolean }
-const DEFAULT_OPTIONS: Options = { hideRecents: false, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
+const DEFAULT_OPTIONS: Options = { hideRecents: true, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
 interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[]; always: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
 /** Landscape side panel: which side, and its width in % of the screen (20–45). */
 interface UiPrefs { panelSide: 'left' | 'right'; panelW: number }
@@ -1254,7 +1254,24 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
   lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
   const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
   lap('Structure check');
-  if (ocr && S.boxes.some((b) => b.length)) {
+  if (method === 'vector' && S.boxes.some((b) => b.length)) {
+    // Keep original text leaves shapes that are only partly under a box (e.g. text drawn as outlines) in the file,
+    // hidden by the black box. So the same redaction without boxes must show nothing readable where the boxes go.
+    // Always run, and fail closed: the structural checks above only see real text.
+    onProgress('Checking under the black boxes', 1);
+    try {
+      const bare = await exportVector(S.bytes!, S.password, S.boxes, () => {}, { blackBoxes: false });
+      report.ocr = await ocrRedactedRegions(bare, S.boxes, onProgress);
+      if (report.ocr.leaks.length) {
+        report.ok = false;
+        report.issues.push(`Readable content left under ${report.ocr.leaks.length} box(es). Use "Image only" for this file`);
+      }
+    } catch (e) {
+      report.ok = false;
+      report.issues.push(`Could not check under the black boxes: ${(e as Error).message}`);
+    }
+    lap('Under-box check');
+  } else if (ocr && S.boxes.some((b) => b.length)) {
     try {
       onProgress('Double-checking blacked-out areas', 1);
       report.ocr = await ocrRedactedRegions(res.bytes, S.boxes, onProgress);
@@ -1343,11 +1360,13 @@ function exportDialog() {
       resultDialog(out);
     } catch (e) {
       w.done('Export stopped', 'Something went wrong. Open Umbra PDF for details.');
-      const hidden = (e as Error).name === 'HiddenLayersError';
-      modal(`<div class="big-icon bad">${ICON_BAD}</div><h2>${hidden ? 'This PDF has hidden layers' : 'Something went wrong'}</h2>
+      const hidden = (e as Error).name === 'HiddenLayersError', hiddenText = (e as Error).name === 'HiddenTextError';
+      modal(`<div class="big-icon bad">${ICON_BAD}</div><h2>${hidden ? 'This PDF has hidden layers' : hiddenText ? 'This PDF has hidden text' : 'Something went wrong'}</h2>
         <p class="hint">${hidden
           ? 'Parts of this file are switched off and never shown, so they couldn\'t be reviewed. Nothing was saved. Export again with "Image only", which keeps only what you can see.'
-          : 'Nothing was saved. Try again, or pick a lower quality if the file is very large.'}</p>
+          : hiddenText
+            ? 'A page you redacted also has text you can\'t see (for example a scan\'s text layer), and it may not line up with your boxes. Nothing was saved. Export again with "Image only", which keeps only what you can see and can still make it searchable.'
+            : 'Nothing was saved. Try again, or pick a lower quality if the file is very large.'}</p>
         <details><summary>Details</summary><p>${esc((e as Error).message)}</p></details>
         <div class="row"><button id="r-close">Close</button></div>`, true);
       $('#r-close').onclick = closeModal;
@@ -1392,7 +1411,8 @@ function resultDialog(out: ExportOutcome) {
   } else {
     // Fail closed: no save path offered.
     modal(`<div class="big-icon bad">${ICON_BAD}</div><h2>Not saved, to keep you safe</h2>
-      <p class="hint">The final check found something that might reveal hidden content, so Umbra didn't save it. Try again with a higher quality, or draw slightly larger boxes.</p>
+      <p class="hint">The final check found something that might reveal hidden content, so Umbra didn't save it. ${report.issues.some((i) => /Image only/.test(i))
+        ? 'Export again with "Image only", which keeps only what you can see.' : 'Try again with a higher quality, or draw slightly larger boxes.'}</p>
       <details ${prefs.advanced ? 'open' : ''}><summary>Details</summary>${technicalReport(out)}</details>
       <div class="row"><button id="r-close">Close</button></div>`, true);
     $('#r-close').onclick = closeModal;

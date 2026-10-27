@@ -24,16 +24,18 @@ const intersects = (a: [number, number, number, number], b: [number, number, num
 
 /**
  * Words from OCR of the *redacted* image, trimmed to what is visibly outside every box.
+ * estimated: the words were read before the boxes were drawn and letter positions are estimates, so letters keep
+ * a wider berth from a box (about half a letter).
  * A partly covered word keeps its visible letters (glyph boxes), so "Pass" stays searchable when "port" is blacked out.
  * Glyphs touching or near a box are dropped (small margin), and so is a word that can't be split per glyph.
  */
 const MIN_WORD_CONF = 30;
 const MIN_GLYPH_CONF = 45;
-function visibleFragments(words: OcrWord[], boxesPx: [number, number, number, number][]): OcrWord[] {
+function visibleFragments(words: OcrWord[], boxesPx: [number, number, number, number][], estimated = false): OcrWord[] {
   const out: OcrWord[] = [];
   for (const w of words) {
     const h = w.y1 - w.y0;
-    const m = Math.max(2, h * 0.08);
+    const m = Math.max(2, h * (estimated ? 0.3 : 0.08));
     const near = (x0: number, x1: number) =>
       boxesPx.some((b) => intersects([x0 - m, w.y0 - m, x1 - x0 + 2 * m, h + 2 * m], b));
     if (!near(w.x0, w.x1)) { if (w.confidence >= MIN_WORD_CONF) out.push(w); continue; }
@@ -239,7 +241,7 @@ export async function exportRedacted(
         words = visibleFragments(pts.map((w) => ({
           ...w, x0: px(w.x0), y0: px(w.y0), x1: px(w.x1), y1: px(w.y1),
           symbols: w.symbols.map((sy) => ({ ...sy, x0: px(sy.x0), y0: px(sy.y0), x1: px(sy.x1), y1: px(sy.y1) })),
-        })), boxesPx);
+        })), boxesPx, true); // read from the unredacted pixels
       } else if (opts.searchable) {
         onProgress(`Reading text on page ${i}/${n}`, (i - 0.75) / n);
         // OCR a copy at most 300 DPI (4x fewer pixels at 600 DPI) with the boxes painted WHITE:
