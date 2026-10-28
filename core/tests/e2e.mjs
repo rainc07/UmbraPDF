@@ -664,6 +664,73 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
   check(JSON.stringify(texts) === '["Kuala Lumpur","TAN CHEE KIN"]', `always redact (scanned): name split over two lines and the place found, not inside "Lumpurville" (${JSON.stringify(hits)})`);
 }
 
+// ---------------- Split ----------------
+{
+  const d = await PDFDocument.create(); const f = await d.embedFont(StandardFonts.Helvetica);
+  for (let i = 1; i <= 5; i++) {
+    const p = d.addPage(i === 3 ? [595, 842] : [842, 595]); // page 3: a single portrait page among spreads
+    p.drawText(`LEFT${i}`, { x: 60, y: 300, size: 28, font: f });
+    if (i !== 3) p.drawText(`RIGHT${i}`, { x: 500, y: 300, size: 28, font: f });
+  }
+  d.setTitle('Split secret title');
+  const src = await d.save();
+  const r = await page.evaluate(async (arr) => {
+    const T = window.__umbraTest;
+    await T.load(new Uint8Array(arr), 'book.pdf');
+    const every = await T.split({ mode: 'every', every: 1 });
+    const ranges = await T.split({ mode: 'ranges', ranges: '1-2, 4-' });
+    const [halves] = await T.split({ mode: 'half', cut: 'lr', widerOnly: true });
+    const [rtl] = await T.split({ mode: 'half', cut: 'lr', rtl: true, widerOnly: false });
+    const pageTexts = async (b) => (await T.text(new Uint8Array(b))).trim().split('\n').map((l) => l.trim());
+    let badRange = '';
+    try { await T.split({ mode: 'ranges', ranges: '4-2' }); } catch (e) { badRange = e.message; }
+    return {
+      every: await Promise.all(every.map(async (p) => ({ label: p.label, text: await pageTexts(p.bytes) }))),
+      ranges: ranges.map((p) => p.label),
+      halves: await pageTexts(halves.bytes), halvesSize: halves.bytes.length,
+      rtl: (await pageTexts(rtl.bytes)).slice(0, 2),
+      badRange,
+      bytes: every[0].bytes,
+    };
+  }, Array.from(src));
+  check(r.every.length === 5 && r.every.every((p, i) => p.text.length === 1 && p.text[0].includes(`LEFT${i + 1}`)) && r.every[0].label === 'p1',
+    `split every page: 5 one-page files in order (${r.every.map((p) => p.label).join(', ')})`);
+  check(JSON.stringify(r.ranges) === '["p1-2","p4-5"]', `split ranges "1-2, 4-": ${JSON.stringify(r.ranges)}`);
+  check(JSON.stringify(r.halves) === JSON.stringify(['LEFT1', 'RIGHT1', 'LEFT2', 'RIGHT2', 'LEFT3', 'LEFT4', 'RIGHT4', 'LEFT5', 'RIGHT5']),
+    `cut in half, wide pages only: each half shows its own side, the portrait page stays whole (${r.halves.join(' ')})`);
+  check(r.halvesSize < src.length * 1.6 + 4000, `cut in half: halves share the page content (${r.halvesSize} bytes from ${src.length})`);
+  check(JSON.stringify(r.rtl) === '["RIGHT1","LEFT1"]', `cut in half, right page first: ${r.rtl.join(' ')}`);
+  check(/backwards/.test(r.badRange), `bad range is refused: "${r.badRange}"`);
+  check(!/Split secret title/.test(Buffer.from(r.bytes).toString('latin1')), 'split parts carry no document metadata');
+}
+
+// Split with redactions: the redacted, checked copy is split, never the original. Saved through the folder picker.
+{
+  const parts = await page.evaluate(async (arr) => {
+    const T = window.__umbraTest;
+    await T.load(new Uint8Array(arr), 'hr.pdf');
+    const h = T.sizes()[0].height;
+    T.setBoxes(T.sizes().map(() => [{ x: 66, y: h - 728, w: 260, h: 36 }]));
+    const saved = [];
+    window.showDirectoryPicker = async () => ({
+      getFileHandle: async (name, o) => {
+        if (!o?.create) throw new DOMException('missing', 'NotFoundError');
+        return { createWritable: async () => ({ write: async (b) => saved.push({ name, bytes: Array.from(new Uint8Array(b.buffer ?? b)) }), close: async () => {} }) };
+      },
+    });
+    document.querySelector('#btn-split').click();
+    document.querySelector('#sp-mode [data-m="every"]').click();
+    document.querySelector('#sp-go').click();
+    for (let t = 0; t < 600 && !document.querySelector('#r-save'); t++) await new Promise((r) => setTimeout(r, 100));
+    document.querySelector('#r-save')?.click();
+    for (let t = 0; t < 100 && saved.length < 2; t++) await new Promise((r) => setTimeout(r, 100));
+    delete window.showDirectoryPicker;
+    return saved;
+  }, Array.from(fixture));
+  check(parts.length === 2 && parts[0].name === 'hr-redacted-p1.pdf', `split with boxes saves the redacted copy's pages to a folder (${parts.map((p) => p.name).join(', ')})`);
+  check(parts.every((p) => !/SECRET|123-45-6789|Jane Leak|evil\.example|notes\.txt/.test(Buffer.from(p.bytes).toString('latin1'))), 'split parts of a redacted file hold no secret strings');
+}
+
 await browser.close();
 server.close();
 console.log(failed ? `\n${failed} check(s) failed` : '\nALL CHECKS PASSED');

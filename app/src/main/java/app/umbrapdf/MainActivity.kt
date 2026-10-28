@@ -57,10 +57,15 @@ class MainActivity : ComponentActivity() {
         bridge.finishSave(uri)
     }
 
+    private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        bridge.finishSaveAll(uri)
+    }
+
     private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     fun launchOpen() = openDoc.launch(arrayOf("application/pdf"))
     fun launchCreate(name: String) = createDoc.launch(name)
+    fun launchPickFolder() = pickFolder.launch(null)
     fun evalJs(js: String) = web.evaluateJavascript(js, null)
 
     /** Latest safe-area insets in CSS px, handed to the web UI (it draws under the system bars). */

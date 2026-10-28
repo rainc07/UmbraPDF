@@ -25,6 +25,11 @@ export interface Host {
   openPdf(): Promise<OpenedFile | null>;
   /** Ask the user where to save. Resolves false on cancel. */
   savePdf(suggestedName: string, bytes: Uint8Array): Promise<boolean>;
+  /**
+   * Save several files at once (a split). Android: the user picks a folder. Browser: a folder where it can, else one ZIP.
+   * Resolves the number of files saved, or false on cancel.
+   */
+  saveFiles?(zipName: string, files: OpenedFile[]): Promise<number | false>;
   /** Files pushed in by the host (e.g. Android "Open with"). */
   onExternalOpen(cb: (f: OpenedFile) => void): void;
   /** Small persistent settings blob (JSON string). */
