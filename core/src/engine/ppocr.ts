@@ -251,6 +251,8 @@ export async function ppocrPage(
   canvas: HTMLCanvasElement,
   onCardWords: (words: OcrWord[], W: number, H: number) => OcrWord[] = (w) => w,
   base?: OcrWord[],
+  /** false: no card search, the page is only read plainly (a born-digital page: no photos of cards to straighten). */
+  withCards = true,
 ): Promise<OcrWord[]> {
   const W = canvas.width, H = canvas.height;
   const centre = (q: Quad): P => [q.reduce((s, p) => s + p[0], 0) / 4, q.reduce((s, p) => s + p[1], 0) / 4];
@@ -258,8 +260,8 @@ export async function ppocrPage(
   const area = (q: Quad) => { const r = rect(q); return (r.x1 - r.x0) * (r.y1 - r.y0); };
   const overlaps = (a: Quad, b: Quad) => inQuad(a, ...centre(b)) || inQuad(b, ...centre(a));
   const t0 = performance.now();
-  let shapes = findCards(canvas);
-  let islands = contentGroups(canvas);
+  let shapes = withCards ? findCards(canvas) : [];
+  let islands = withCards ? contentGroups(canvas) : [];
   shapes = shapes.filter((c) => !islands.some((q) => overlaps(c, q) && area(q) > 1.5 * area(c)));
   islands = islands.filter((q) => !shapes.some((c) => overlaps(c, q)));
   // An island is the card's print, not the card: widen it to card proportions (blank margins, a faint

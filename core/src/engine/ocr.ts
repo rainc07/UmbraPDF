@@ -710,7 +710,7 @@ export async function readCards(canvas: HTMLCanvasElement, base: OcrWord[]): Pro
   finally { t.log.push(`cards on a natively read page: ${Math.round(performance.now() - tp)} ms`); }
 }
 
-export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: (s: string) => void = () => {}, allowTurn = true): Promise<OcrWord[]> {
+export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: (s: string) => void = () => {}, allowTurn = true, cards = true): Promise<OcrWord[]> {
   const t = lastOcrStats;
   const tw = performance.now();
   if (engine === 'paddle' && await ppocrReady()) {
@@ -719,7 +719,7 @@ export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: 
       onStatus('Reading text…');
       ppStats.log = t.log;
       const tp = performance.now();
-      try { return await ppocrPage(canvas, (ws, W, H) => (hasIc(ws) || ws.some((w) => PARTIAL_IC.test(w.text)) ? ws : markUnreadIc(ws, W, H))); } finally { t.log.push(`ppocr page total: ${Math.round(performance.now() - tp)} ms`); }
+      try { return await ppocrPage(canvas, (ws, W, H) => (hasIc(ws) || ws.some((w) => PARTIAL_IC.test(w.text)) ? ws : markUnreadIc(ws, W, H)), undefined, cards); } finally { t.log.push(`ppocr page total: ${Math.round(performance.now() - tp)} ms`); }
     } catch (e) {
       console.warn('[umbra] PaddleOCR failed on this page, using Tesseract', e);
     }
