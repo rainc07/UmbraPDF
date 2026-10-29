@@ -12,3 +12,5 @@ export type { PageText, TextMatch, SearchPattern, Hit, ExtractOptions } from './
 export { PRESETS, DEFAULT_PRESET_IDS, buildPatterns, compileCustom, luhn, normAlways, ALWAYS_LABEL, ALWAYS_MAX } from './detect';
 export type { Preset, CustomPattern, DetectOptions } from './detect';
 export { exportVector, loadMuPdf, stripMarkedContentText, HiddenLayersError, HiddenTextError } from './vector';
+export { splitPdf, planSplit, parseRanges, SplitRangeError } from './split';
+export type { SplitSpec, SplitPart } from './split';

@@ -1,13 +1,25 @@
 import type { Host, OpenedFile } from './host';
 import { useLocalServerOcr } from './localServer';
+import { zip } from './zip';
 
 const PREFS_KEY = 'umbra.prefs.v1';
 
+interface DirHandle {
+  getFileHandle(name: string, o?: { create?: boolean }): Promise<{ createWritable(): Promise<{ write(b: BlobPart): Promise<void>; close(): Promise<void> }> }>;
+}
+type DirPicker = (o: { mode: 'readwrite'; id?: string }) => Promise<DirHandle>;
 type SavePicker = (o: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) =>
   Promise<{ createWritable(): Promise<{ write(b: BlobPart): Promise<void>; close(): Promise<void> }> }>;
 
 const isPdf = (f: File) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
 const opened = async (f: File): Promise<OpenedFile> => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+
+function download(name: string, bytes: Uint8Array, type: string) {
+  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
 
 /** Plain browser host: the desktop web app (web/ server), the dev server and the tests. */
 export function createBrowserHost(): Host {
@@ -43,11 +55,31 @@ export function createBrowserHost(): Host {
           // No permission (e.g. the click is too long ago): fall back to a download.
         }
       }
-      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/pdf' }));
-      const a = Object.assign(document.createElement('a'), { href: url, download: name });
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      download(name, bytes, 'application/pdf');
       return true;
+    },
+    saveFiles: async (zipName, files) => {
+      // Chrome, Edge: save into a folder the user picks. Existing files are never overwritten ("name (2).pdf").
+      const pickDir = (window as unknown as { showDirectoryPicker?: DirPicker }).showDirectoryPicker;
+      if (pickDir) {
+        let dir: DirHandle | null = null;
+        try { dir = await pickDir({ mode: 'readwrite', id: 'umbra-split' }); } catch (e) {
+          if ((e as Error).name === 'AbortError') return false;
+          // No permission (e.g. the click is too long ago): fall back to a ZIP download.
+        }
+        if (dir) {
+          for (const f of files) {
+            let name = f.name;
+            for (let k = 2; await dir.getFileHandle(name).then(() => true, () => false); k++) name = f.name.replace(/(\.pdf)?$/i, ` (${k})$1`);
+            const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
+            await w.write(f.bytes as BlobPart);
+            await w.close();
+          }
+          return files.length;
+        }
+      }
+      download(zipName, zip(files), 'application/zip');
+      return files.length;
     },
     // A PDF dropped on the window opens like Android's "Open with".
     onExternalOpen: (cb) => {
