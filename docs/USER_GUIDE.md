@@ -85,7 +85,7 @@ The parts are always cut from the redacted copy after it passed the safety check
 
 **Saving:** on Android, pick a folder and every part is saved there. In the desktop web app, Chrome and Edge ask for a folder too (existing files are never overwritten); other browsers download one ZIP. Files are named after the document, for example `report-redacted-p01.pdf`, `report-redacted-p1-3.pdf` or `report-redacted-halves.pdf`.
 
-**Speed tip:** for a PDF with real text (not a scan), **Keep original text** is fast and stays searchable. **Image only** with OCR reads every page again from its picture, so it takes a few seconds per page.
+**Speed tip:** for a PDF with real text (not a scan), **Keep original text** is fast and stays searchable. **Image only** with OCR reads each page again from its picture, which takes a few seconds per page. Two cases are much quicker: pages Umbra already read (for example with Auto Detect), and pages of a scan that already has its own text layer (most scanner apps add one) with no black box on them. There Umbra reuses that text, keeping only the words printed on the page, and never anything near a box.
 
 ## 7. Going back
 The Android **Back** button closes an open dialog or panel first, then returns to the start screen. If you have redactions that haven't been exported, Umbra asks before leaving.

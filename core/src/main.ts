@@ -1254,7 +1254,7 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
   const lap = (name: string) => { const t = performance.now(); timings.push([name, t - t0]); t0 = t; };
   const res = method === 'vector'
     ? { bytes: await exportVector(S.bytes!, S.password, S.boxes, onProgress), downscaled: [], ocrWords: 0 }
-    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.get(i).then((pt) => (pt.source === 'ocr' ? pageTextWords(pt) : null)) : undefined);
+    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr' })) : undefined);
   lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
   const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
   lap('Structure check');
@@ -1413,6 +1413,14 @@ function exportFailed(e: unknown) {
   $('#r-close').onclick = closeModal;
 }
 
+/** OCR and per-page timings (Advanced), with a Copy button: what's needed to tell where time goes. */
+function ocrLogHtml(): string {
+  const log = lastOcrStats.log.slice(-80);
+  if (!log.length) return '';
+  return `<details><summary>OCR timings</summary><pre id="ocr-log" style="white-space:pre-wrap;font-size:11px">${esc(`${navigator.hardwareConcurrency || '?'} CPU cores\n${log.join('\n')}`)}</pre>
+    <button type="button" data-copy-log>Copy timings</button></details>`;
+}
+
 function technicalReport({ bytes, report, downscaled, ocrWords, timings }: ExportOutcome): string {
   const sec = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
   const mb = (bytes.length / 1048576).toFixed(2);
@@ -1427,7 +1435,7 @@ function technicalReport({ bytes, report, downscaled, ocrWords, timings }: Expor
     ...(report.notes ?? []),
     ...downscaled.map((d) => `Page ${d.page} reduced to ${d.dpi} DPI to fit memory`),
     ...report.issues.map((i) => `ISSUE: ${i}`),
-  ].map(li).join('')}</ul>`;
+  ].map(li).join('')}</ul>${ocrLogHtml()}`;
 }
 
 function resultDialog(out: ExportOutcome) {
@@ -1537,7 +1545,7 @@ function splitResult(parts: SplitPart[], timings: [string, number][] = []) {
     <p class="hint">Cut from your redacted copy, which passed the safety check. ${multi
       ? host.name === 'android' ? 'Pick a folder and they\'re all saved there.' : 'Pick a folder, or they download as one ZIP.' : ''}</p>
     <p class="note">${multi ? `${esc(files[0].name)} … ${esc(files[files.length - 1].name)}` : esc(files[0].name)} · ${sizeText(bytes)}</p>
-    ${prefs.advanced && timings.length ? `<details open><summary>Technical report</summary><ul><li>Time: ${esc(timings.map(([n, ms]) => `${n} ${(ms / 1000).toFixed(1)} s`).join(', '))}</li></ul></details>` : ''}
+    ${prefs.advanced && timings.length ? `<details open><summary>Technical report</summary><ul><li>Time: ${esc(timings.map(([n, ms]) => `${n} ${(ms / 1000).toFixed(1)} s`).join(', '))}</li></ul>${ocrLogHtml()}</details>` : ''}
     <div class="row"><button id="r-close">Cancel</button><button id="r-save" class="primary">${multi ? 'Save files' : 'Save PDF'}</button></div>`, true);
   $('#r-close').onclick = closeModal;
   $('#r-save').onclick = async () => {
@@ -1593,6 +1601,11 @@ $('#btn-settings').onclick = settingsDialog;
 $('#zoom-in').onclick = () => setZoom(S.zoom * 1.25);
 $('#zoom-out').onclick = () => setZoom(S.zoom / 1.25);
 $('#btn-export').onclick = () => S.doc && !S.busy && exportDialog();
+// "Copy timings" in a technical report (inline handlers are blocked by the CSP).
+document.addEventListener('click', (e) => {
+  if (!(e.target as HTMLElement).closest('[data-copy-log]')) return;
+  void navigator.clipboard?.writeText(document.getElementById('ocr-log')?.textContent ?? '').then(() => toast('Copied'), () => toast('Copy failed'));
+});
 $('#btn-find').onclick = () => (S.panel === 'find' ? closePanel(true) : openFind());
 $('#btn-detect').onclick = () => (S.panel === 'detect' ? closePanel(true) : openDetect());
 document.addEventListener('keydown', (e) => {

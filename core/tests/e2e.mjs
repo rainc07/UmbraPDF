@@ -744,6 +744,43 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
   check(parts.every((p) => !/SECRET|123-45-6789|Jane Leak|evil\.example|notes\.txt/.test(Buffer.from(p.bytes).toString('latin1'))), 'split parts of a redacted file hold no secret strings');
 }
 
+// Image only + searchable on a scan with the scanner's own invisible text layer: the layer is reused on pages
+// without boxes (no OCR), but only words with printed ink under them. Pages with boxes are read again.
+{
+  const scan = await makeScanFixture();
+  const src = await PDFDocument.load(scan.bytes);
+  const d = await PDFDocument.create();
+  const font = await d.embedFont(StandardFonts.Helvetica);
+  for (const pg of await d.copyPages(src, [0, 0])) {
+    const p = d.addPage(pg);
+    p.drawRectangle({ x: 300, y: 80, width: 200, height: 40, color: rgb(0, 0, 0) }); // a drawn bar, not a box
+    const f = p.node.newFontDictionary('FH', font.ref);
+    const put = (t, x, y, size) => p.pushOperators(pushGraphicsState(), beginText(), setFontAndSize(f, size),
+      setTextRenderingMode(TextRenderingMode.Invisible), moveText(x, y), showText(font.encodeText(t)), endText(), popGraphicsState());
+    put('Public line stays visible', 72, 792 - 72, 16.3); // lines up with the printed line
+    SCAN_LINES.forEach(([pre, val], j) => put(pre + val, 72, 792 - (220 + 70 * j) * 72 / 150, 16.3));
+    put('GHOSTWORD', 100, 40, 14);   // over blank paper
+    put('BARWORD', 320, 92, 14);     // under the drawn black bar
+  }
+  const r = await page.evaluate(async ([arr, box]) => {
+    const T = window.__umbraTest;
+    await T.load(new Uint8Array(arr));
+    T.setBoxes([[], [box]]);
+    T.resetOcrStats();
+    const t0 = performance.now();
+    const s = await T.export({ dpi: 200, searchable: true }, false);
+    const ms = Math.round(performance.now() - t0);
+    const pages = (await T.text(s.bytes)).split('\n');
+    return { ok: s.report.ok, issues: s.report.issues, pages, log: T.ocrStats().log.filter((l) => /^export page/.test(l)), ms };
+  }, [Array.from(await d.save()), scan.expected[0].rect]);
+  const [p1, p2] = r.pages.length >= 2 ? r.pages : [r.pages.join(''), ''];
+  check(r.ok, `text layer reuse: export verified (${r.issues.join('; ') || 'no issues'}, ${r.ms} ms)`);
+  check(/text layer reused/.test(r.log[0] ?? '') && /read now/.test(r.log[1] ?? ''), `text layer reused on the page without boxes, page with boxes read again (${r.log.join(' | ')})`);
+  check(/Public line stays visible/.test(p1) && /ahmad@example\.com/.test(p1), 'text layer reuse: printed words stay searchable');
+  check(!/GHOSTWORD|BARWORD/.test(r.pages.join(' ')), 'text layer reuse: words over blank paper or under a drawn bar are dropped');
+  check(!/850505/.test(p2) && /Public/.test(p2), 'page with boxes: boxed value absent, rest read by OCR');
+}
+
 await browser.close();
 server.close();
 console.log(failed ? `\n${failed} check(s) failed` : '\nALL CHECKS PASSED');
