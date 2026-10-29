@@ -294,7 +294,9 @@ export async function exportRedacted(
         c2.drawImage(canvas, 0, 0, src.width, src.height);
         c2.fillStyle = '#fff';
         for (const b of boxesPx) c2.fillRect(Math.floor(b[0] * k) - 1, Math.floor(b[1] * k) - 1, Math.ceil(b[2] * k) + 2, Math.ceil(b[3] * k) + 2);
-        const raw = await recognizeWordsRobust(src, (m) => onProgress(m, (i - 0.75) / n));
+        // Only pages with a real text layer get here (scans reuse what was read): a plain read, no card search.
+        // A whole page of print otherwise looks like one big card and is read twice.
+        const raw = await recognizeWordsRobust(src, (m) => onProgress(m, (i - 0.75) / n), true, !textFor);
         src.width = src.height = 0;
         const up = (v: number) => v / k;
         words = visibleFragments(k < 1 ? raw.map((w) => ({
