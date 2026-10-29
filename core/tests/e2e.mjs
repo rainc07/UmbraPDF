@@ -706,7 +706,7 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
 
 // Split with redactions: the redacted, checked copy is split, never the original. Saved through the folder picker.
 {
-  const parts = await page.evaluate(async (arr) => {
+  let parts = await page.evaluate(async (arr) => {
     const T = window.__umbraTest;
     await T.load(new Uint8Array(arr), 'hr.pdf');
     const h = T.sizes()[0].height;
@@ -724,9 +724,19 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
     for (let t = 0; t < 600 && !document.querySelector('#r-save'); t++) await new Promise((r) => setTimeout(r, 100));
     document.querySelector('#r-save')?.click();
     for (let t = 0; t < 100 && saved.length < 2; t++) await new Promise((r) => setTimeout(r, 100));
+    // Split again with the same boxes: the checked redacted copy is reused, not made again.
+    T.setAdvanced(true);
+    document.querySelector('#btn-split').click();
+    document.querySelector('#sp-go').click();
+    for (let t = 0; t < 600 && !document.querySelector('#r-save'); t++) await new Promise((r) => setTimeout(r, 100));
+    const again = document.querySelector('#modal').textContent;
+    document.querySelector('#r-close').click();
+    T.setAdvanced(false);
     delete window.showDirectoryPicker;
-    return saved;
+    return { files: saved, again };
   }, Array.from(fixture));
+  check(/reused from Export/.test(parts.again), 'splitting again with the same boxes reuses the checked redacted copy');
+  parts = parts.files;
   check(parts.length === 2 && parts[0].name === 'hr-redacted-p1.pdf', `split with boxes saves the redacted copy's pages to a folder (${parts.map((p) => p.name).join(', ')})`);
   check(parts.every((p) => !/SECRET|123-45-6789|Jane Leak|evil\.example|notes\.txt/.test(Buffer.from(p.bytes).toString('latin1'))), 'split parts of a redacted file hold no secret strings');
 }

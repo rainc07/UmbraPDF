@@ -48,6 +48,8 @@ const S = {
   applied: [] as Sugg[], // items redacted from Find/Auto Detect this session (Redacted tab: untick to un-redact)
   bytes: null as Uint8Array | null, // original file, for "Keep original text" export
   password: undefined as string | undefined,
+  /** The last redacted copy that passed the safety check, and what it was made from (boxes + settings). */
+  verified: null as { key: string; out: ExportOutcome } | null,
 };
 
 // ---------- UI helpers ----------
@@ -144,6 +146,7 @@ async function loadFile(file: OpenedFile) {
   S.name = file.name.replace(/\.pdf$/i, '') || 'document';
   S.bytes = file.bytes;
   S.password = password;
+  S.verified = null;
   S.applied = [];
   S.sizes = await pageSizes(doc);
   S.boxes = S.sizes.map(() => []);
@@ -1286,8 +1289,15 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
     }
     lap('Black-box check');
   }
-  return { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords, timings };
+  const out = { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords, timings };
+  // Kept so Split (or Export again) with the same boxes and settings needn't redo the redaction and its checks.
+  S.verified = ocr && report.ok ? { key: exportKey(opts, method), out } : null;
+  return out;
 }
+
+/** What a redacted copy depends on: the boxes and the export settings that shape it. */
+const exportKey = (opts: ExportOptions, method: 'vector' | 'image') =>
+  JSON.stringify([method, method === 'image' ? [opts.dpi, opts.format, opts.jpegQuality, opts.maxPixels, opts.searchable] : 0, S.boxes]);
 
 const ICON_OK = '<svg class="ico" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_BAD = '<svg class="ico" viewBox="0 0 24 24"><path d="M12 7v6M12 17h.01"/></svg>';
@@ -1515,13 +1525,17 @@ async function runSplit(spec: SplitSpec, redact: boolean) {
     const bar = document.getElementById('x-bar') as HTMLProgressElement | null; if (bar) bar.value = base + f * span;
     w.progress(label, base + f * span);
   };
+  const timings: [string, number][] = [];
   try {
     let source = S.bytes!, password = S.password;
     if (redact) {
       // Never split the original while it has boxes: split the redacted copy, and only if it passes the safety check.
       const method = prefs.export.method;
       const opts: ExportOptions = { ...DEFAULT_EXPORT, dpi: prefs.export.dpi, format: prefs.export.compression, searchable: method === 'image' && prefs.export.searchable };
-      const out = await runExport(opts, true, progress(0, 0.8, 'Redacting and checking it\'s safe…'), method);
+      // Exported already with these boxes and settings: split that checked copy instead of making it again.
+      const done = S.verified?.key === exportKey(opts, method) ? S.verified.out : null;
+      const out = done ?? await runExport(opts, true, progress(0, 0.8, 'Redacting and checking it\'s safe…'), method);
+      if (done) timings.push(['Redacted copy reused from Export', 0]); else timings.push(...out.timings);
       if (!out.report.ok) {
         w.done('Not split, to keep you safe', 'The final check found a problem. Open Umbra PDF for details.');
         resultDialog(out);
@@ -1529,9 +1543,11 @@ async function runSplit(spec: SplitSpec, redact: boolean) {
       }
       source = out.bytes; password = undefined;
     }
+    const t0 = performance.now();
     const parts = await splitPdf(source, password, spec, progress(redact ? 0.8 : 0, redact ? 0.2 : 1, 'Splitting…'));
+    timings.push(['Split', performance.now() - t0]);
     w.done('Ready to save', 'Your PDF is split. Tap to save the files.');
-    splitResult(parts, redact);
+    splitResult(parts, redact, timings);
   } catch (e) {
     w.done('Split stopped', 'Something went wrong. Open Umbra PDF for details.');
     exportFailed(e);
@@ -1540,7 +1556,7 @@ async function runSplit(spec: SplitSpec, redact: boolean) {
   }
 }
 
-function splitResult(parts: SplitPart[], redacted: boolean) {
+function splitResult(parts: SplitPart[], redacted: boolean, timings: [string, number][] = []) {
   const base = `${S.name}${redacted ? '-redacted' : ''}`;
   const files = parts.map((p) => ({ name: `${base}-${p.label}.pdf`, bytes: p.bytes }));
   const bytes = files.reduce((k, f) => k + f.bytes.length, 0);
@@ -1548,7 +1564,8 @@ function splitResult(parts: SplitPart[], redacted: boolean) {
   modal(`<div class="big-icon ok">${ICON_OK}</div><h2>${multi ? `${files.length} files ready` : 'Ready'}</h2>
     <p class="hint">${redacted ? 'Made from your redacted copy, which passed the safety check. ' : ''}${multi
       ? host.name === 'android' ? 'Pick a folder and they\'re all saved there.' : 'Pick a folder, or they download as one ZIP.' : ''}</p>
-    <p class="note">${multi ? `${files[0].name} … ${files[files.length - 1].name}` : esc(files[0].name)} · ${sizeText(bytes)}</p>
+    <p class="note">${multi ? `${esc(files[0].name)} … ${esc(files[files.length - 1].name)}` : esc(files[0].name)} · ${sizeText(bytes)}</p>
+    ${prefs.advanced && timings.length ? `<details open><summary>Technical report</summary><ul><li>Time: ${esc(timings.map(([n, ms]) => `${n} ${(ms / 1000).toFixed(1)} s`).join(', '))}</li></ul></details>` : ''}
     <div class="row"><button id="r-close">Cancel</button><button id="r-save" class="primary">${multi ? 'Save files' : 'Save PDF'}</button></div>`, true);
   $('#r-close').onclick = closeModal;
   $('#r-save').onclick = async () => {
@@ -1693,6 +1710,7 @@ syncToolbar();
   removeTerm: async (i: number) => { S.findTerms.splice(i, 1); await searchTerms(); return { terms: S.findTerms.length, hits: S.sugg.length }; },
   removeType: (label: string) => { removeType(label); return S.sugg; },
   setOpt: (k: keyof Options, v: boolean) => { prefs.opts[k] = v; },
+  setAdvanced: (v: boolean) => { prefs.advanced = v; },
   detect: async (enabled: string[], custom: CustomPattern[] = []) => { if (S.panel !== 'detect') openDetect(); await runDetect(enabled, custom); return S.sugg; },
   applyOne: (id: number) => applySugg(S.sugg.filter((x) => x.id === id)),
   applyAll: () => applySugg(S.sugg.filter((x) => x.on)),
