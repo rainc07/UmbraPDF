@@ -771,7 +771,14 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
     const s = await T.export({ dpi: 200, searchable: true }, false);
     const ms = Math.round(performance.now() - t0);
     const pages = (await T.text(s.bytes)).split('\n');
-    return { ok: s.report.ok, issues: s.report.issues, pages, log: T.ocrStats().log.filter((l) => /^export page/.test(l)), ms };
+    const log = T.ocrStats().log.filter((l) => /^export page/.test(l));
+    // After Auto Detect / search has read the pages, the page with boxes reuses that read of its picture.
+    await T.pageText(0); await T.pageText(1);
+    T.resetOcrStats();
+    const s2 = await T.export({ dpi: 200, searchable: true }, false);
+    const pages2 = (await T.text(s2.bytes)).split('\n');
+    return { ok: s.report.ok, issues: s.report.issues, pages, log, ms,
+      ok2: s2.report.ok, pages2, log2: T.ocrStats().log.filter((l) => /^export page/.test(l)) };
   }, [Array.from(await d.save()), scan.expected[0].rect]);
   const [p1, p2] = r.pages.length >= 2 ? r.pages : [r.pages.join(''), ''];
   check(r.ok, `text layer reuse: export verified (${r.issues.join('; ') || 'no issues'}, ${r.ms} ms)`);
@@ -779,6 +786,8 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
   check(/Public line stays visible/.test(p1) && /ahmad@example\.com/.test(p1), 'text layer reuse: printed words stay searchable');
   check(!/GHOSTWORD|BARWORD/.test(r.pages.join(' ')), 'text layer reuse: words over blank paper or under a drawn bar are dropped');
   check(!/850505/.test(p2) && /Public/.test(p2), 'page with boxes: boxed value absent, rest read by OCR');
+  check(r.ok2 && /picture read before/.test(r.log2[1] ?? '') && /text layer reused/.test(r.log2[0] ?? ''), `after the pages were read, the page with boxes reuses that OCR (${r.log2.join(' | ')})`);
+  check(!/850505/.test(r.pages2[1] ?? '') && /Public line/.test(r.pages2[1] ?? '') && !/GHOSTWORD|BARWORD/.test(r.pages2.join(' ')), `reused OCR on the page with boxes: boxed value absent, rest searchable ("${(r.pages2[1] ?? '').slice(0, 80)}")`);
 }
 
 await browser.close();

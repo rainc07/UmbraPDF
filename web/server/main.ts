@@ -3,6 +3,7 @@
 // over the same messages as the Android bridge: binary [id, w, h, limit] (int32 LE) + RGBA, or {"id","kind":"warm"}.
 // Documents never leave the computer: pages arrive from the browser on this machine and only text lines go back.
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { availableParallelism, platform } from 'node:os';
@@ -17,11 +18,20 @@ const ort = createRequire(import.meta.url)('onnxruntime-node') as Ort;
 const here = dirname(fileURLToPath(import.meta.url));
 const arg = (k: string) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : undefined; };
 const flag = (k: string) => process.argv.includes(k);
-const PORT = Number(arg('--port') ?? process.env.UMBRA_PORT ?? 5180);
+// Optional settings.json next to server.mjs (the installed app ships one): {"port", "threads", "gpu"}. Flags win.
+const SETTINGS_FILE = resolve(arg('--settings') ?? resolve(here, 'settings.json'));
+const settings = ((): { port?: number; threads?: number; gpu?: boolean } => {
+  try { return JSON.parse(readFileSync(SETTINGS_FILE, 'utf8')); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Ignoring ${SETTINGS_FILE}: ${(e as Error).message}`);
+    return {};
+  }
+})();
+const PORT = Number(arg('--port') ?? process.env.UMBRA_PORT ?? settings.port ?? 5180);
+const PORT_TRIES = PORT === 0 ? 1 : 10; // Port taken by another program: try the next ones.
 const ROOT = resolve(arg('--root') ?? resolve(here, '../../core/dist'));
 const MODELS = resolve(arg('--models') ?? resolve(here, '../../core/models/ppocrv5'));
-const THREADS = Math.max(1, Number(arg('--threads') ?? Math.min(8, availableParallelism())));
-const GPU = flag('--gpu'); // DirectML (Windows): try it with --gpu; the CPU is used if it can't start.
+const THREADS = Math.max(1, Number(arg('--threads') ?? settings.threads ?? Math.min(8, availableParallelism())));
+const GPU = flag('--gpu') || settings.gpu === true; // DirectML (Windows): try it with --gpu; the CPU is used if it can't start.
 const HOST = '127.0.0.1';
 
 const MIME: Record<string, string> = {
@@ -159,9 +169,9 @@ function openBrowser(url: string) {
 }
 
 /** Is Umbra PDF already running on this port? Then just open it. */
-function alreadyRunning(): Promise<boolean> {
+function alreadyRunning(p: number): Promise<boolean> {
   return new Promise((ok) => {
-    const r = httpRequest({ host: HOST, port: PORT, path: '/api/caps', headers: { host: `${HOST}:${PORT}` }, timeout: 1500 }, (res) => {
+    const r = httpRequest({ host: HOST, port: p, path: '/api/caps', headers: { host: `${HOST}:${p}` }, timeout: 1500 }, (res) => {
       let s = '';
       res.on('data', (c) => (s += c));
       res.on('end', () => { try { ok((JSON.parse(s) as { app?: string }).app === 'umbra-pdf'); } catch { ok(false); } });
@@ -172,23 +182,33 @@ function alreadyRunning(): Promise<boolean> {
   });
 }
 
+let tryPort = PORT;
 server.on('error', async (e: NodeJS.ErrnoException) => {
-  if (e.code === 'EADDRINUSE' && (await alreadyRunning())) {
-    console.log(`Umbra PDF is already running: http://${HOST}:${PORT}/`);
-    openBrowser(`http://${HOST}:${PORT}/`);
-    process.exit(0);
-  }
-  console.error(e.code === 'EADDRINUSE' ? `Port ${PORT} is in use by another program. Start with --port <number>.` : e.message);
+  if (e.code === 'EADDRINUSE') {
+    if (await alreadyRunning(tryPort)) {
+      console.log(`Umbra PDF is already running: http://${HOST}:${tryPort}/`);
+      openBrowser(`http://${HOST}:${tryPort}/`);
+      process.exit(0);
+    }
+    if (tryPort < PORT + PORT_TRIES - 1) {
+      console.log(`Port ${tryPort} is in use by another program, trying ${tryPort + 1}.`);
+      return server.listen(++tryPort, HOST);
+    }
+    console.error(`Port${PORT_TRIES > 1 ? `s ${PORT}-${tryPort} are` : ` ${PORT} is`} in use by other programs. ` +
+      `Set another "port" in ${SETTINGS_FILE} or start with --port <number>.`);
+  } else console.error(e.message);
   process.exit(1);
 });
 
+server.once('listening', () => {
+  const url = `http://${HOST}:${port()}/`;
+  console.log(`Umbra PDF is running at ${url}  (OCR: ${GPU ? 'GPU (DirectML) if available, else ' : ''}${THREADS} CPU threads)`);
+  console.log('Only this computer can open it. Press Ctrl+C to stop.');
+  void loadEngine().then((e) => console.log(`OCR engine ready in ${e.load} ms (${e.ep})`), (err) => console.error(`OCR engine failed to load: ${err.message}`));
+  openBrowser(url);
+});
+
 readFile(resolve(ROOT, 'index.html')).then(
-  () => server.listen(PORT, HOST, () => {
-    const url = `http://${HOST}:${port()}/`;
-    console.log(`Umbra PDF is running at ${url}  (OCR: ${GPU ? 'GPU (DirectML) if available, else ' : ''}${THREADS} CPU threads)`);
-    console.log('Only this computer can open it. Press Ctrl+C to stop.');
-    void loadEngine().then((e) => console.log(`OCR engine ready in ${e.load} ms (${e.ep})`), (err) => console.error(`OCR engine failed to load: ${err.message}`));
-    openBrowser(url);
-  }),
+  () => server.listen(PORT, HOST),
   () => { console.error(`The web app isn't built yet (${ROOT}). Run: npm run web`); process.exit(1); },
 );

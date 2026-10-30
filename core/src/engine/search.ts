@@ -13,6 +13,11 @@ export interface PageText {
   boxes: (Rect | null)[];    // null for synthetic separators
   groups: number[];          // run id per char (text item / OCR line); -1 for separators
   source: 'text' | 'ocr';
+  /**
+   * A scan with its own text layer: every word OCR read from the page picture (page points), including words the
+   * layer already has. Export reuses these on pages with boxes, where the layer itself isn't trusted.
+   */
+  scanWords?: OcrWord[];
 }
 
 export interface TextMatch { page: number; start: number; end: number; text: string; rects: Rect[] }
@@ -306,6 +311,8 @@ async function addImageText(page: PDFPageProxy, t: PageText, dpi: number, onStat
   const scale = ocrScale(page, dpi);
   const full = document.createElement('canvas');
   const groupBase = Math.max(0, ...t.groups) + 1000;
+  const vp = page.getViewport({ scale: 1 });
+  let scanWords: OcrWord[] | undefined;
   // Skip OCR words that sit on real text already in the layer (a caption over a picture).
   const onText = (r: Rect) => t.boxes.some((q) => q && r.x + r.w / 2 >= q.x && r.x + r.w / 2 <= q.x + q.w && r.y + r.h / 2 >= q.y && r.y + r.h / 2 <= q.y + q.h);
   try {
@@ -318,10 +325,17 @@ async function addImageText(page: PDFPageProxy, t: PageText, dpi: number, onStat
       try {
         const words = await recognizeWordsRobust(crop, onStatus);
         if (words.length) { b.sep('\n'); pushWords(b, words, scale, { x: r.x, y: r.y }, groupBase + k * 10000, onText); }
+        if (regions.length === 1 && r.w * r.h >= 0.9 * vp.width * vp.height) {
+          const X = (v: number) => r.x + v / scale, Y = (v: number) => r.y + v / scale;
+          scanWords = words.map((w) => ({
+            ...w, x0: X(w.x0), y0: Y(w.y0), x1: X(w.x1), y1: Y(w.y1),
+            symbols: w.symbols.map((sy) => ({ ...sy, x0: X(sy.x0), y0: Y(sy.y0), x1: X(sy.x1), y1: Y(sy.y1) })),
+          }));
+        }
       } finally { crop.width = crop.height = 0; }
     }
   } finally { full.width = full.height = 0; }
-  return { page: t.page, text: b.text, boxes: b.boxes, groups: b.groups, source: 'text' };
+  return { page: t.page, text: b.text, boxes: b.boxes, groups: b.groups, source: 'text', scanWords };
 }
 
 /** Extract one page's text + geometry, OCR-ing image-only pages when allowed. */

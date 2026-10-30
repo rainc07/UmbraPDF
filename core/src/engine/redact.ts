@@ -269,8 +269,9 @@ export async function exportRedacted(
   /**
    * Already-known text of a page (page points), reused for the searchable layer instead of a new OCR pass.
    * layer: it came from the PDF's own text layer (may hold text nobody sees), not from OCR of the pixels.
+   * scanWords: OCR of the page picture read earlier (e.g. by Auto Detect), for a scan that has a text layer.
    */
-  textFor?: (pageIndex: number) => Promise<{ words: OcrWord[]; layer: boolean } | null>,
+  textFor?: (pageIndex: number) => Promise<{ words: OcrWord[]; layer: boolean; scanWords?: OcrWord[] } | null>,
 ): Promise<ExportResult> {
   const out = await PDFDocument.create({ updateMetadata: false });
   const downscaled: ExportResult['downscaled'] = [];
@@ -306,10 +307,11 @@ export async function exportRedacted(
       // Reuse text already known for the page, minus everything under or near a box: OCR read for search/Auto
       // Detect (same pixels), or the PDF's own text layer. A text layer may hold text nobody sees, possibly a copy
       // of what was boxed placed elsewhere, so it's only reused on pages without boxes, and only words with
-      // printed ink under them. Pages with boxes are read again from their pixels.
+      // printed ink under them. On pages with boxes, OCR of the page picture read earlier is used instead (same
+      // pixels, like a scan without a layer); if there's none the page is read again from its pixels.
       const tt = performance.now();
       let known = opts.searchable && textFor ? await textFor(i - 1) : null;
-      if (known?.layer && boxesPx.length) known = null;
+      if (known?.layer && boxesPx.length) known = known.scanWords ? { words: known.scanWords, layer: false } : null;
       if (known) {
         tText = performance.now() - tt;
         onProgress(`Reading text on page ${i}/${n}`, (i - 0.75) / n);
@@ -322,7 +324,7 @@ export async function exportRedacted(
           const all = words.length;
           words = inkedWords(ctx, words);
           how = `text layer reused (${words.length}/${all} words on ink)`;
-        } else how = 'text read before (reused)';
+        } else how = boxesPx.length ? 'picture read before (reused)' : 'text read before (reused)';
       } else if (opts.searchable) {
         onProgress(`Reading text on page ${i}/${n}`, (i - 0.75) / n);
         // OCR a copy at most 300 DPI (4x fewer pixels at 600 DPI) with the boxes painted WHITE:
