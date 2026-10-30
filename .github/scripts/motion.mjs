@@ -26,41 +26,54 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(sel, ms = 15000) {
   for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200))
     if (await run((s) => { const e = document.querySelector(s); return !!e && !e.disabled; }, sel)) return;
-  const seen = await run(() => document.querySelector('.modal:not([hidden]), #panel:not([hidden])')?.innerText?.slice(0, 300) ?? document.body.className);
+  const seen = await run(() => `body.${document.body.className}: ${document.body.innerText.replace(/\s+/g, ' ').slice(0, 400)}`);
   const errs = await run(() => window.__errs ?? []);
   throw new Error(`${sel} never appeared; on screen: ${seen}; page errors: ${JSON.stringify(errs)}`);
 }
 
-/** Clicks `click`, then records `watch`'s top every frame until it has settled. */
+/**
+ * Clicks `click`, then records every frame: `watch`'s top and the eased progress of the slide (the height
+ * animation)), until it has settled.
+ */
 const track = (watch, click) => run(async (watch, click) => {
   const at = () => { const e = document.querySelector(watch); return e ? e.getBoundingClientRect().top : NaN; };
-  const ys = [at()], ts = [performance.now()];
+  const prog = () => {
+    const a = document.getAnimations().find((x) => x.playState === 'running' && x.effect?.getKeyframes?.().some((k) => 'height' in k));
+    return a ? a.effect.getComputedTiming().progress : null;
+  };
+  const ys = [at()], ps = [null], ts = [performance.now()];
   document.querySelector(click).click();
   const t0 = performance.now();
-  await new Promise((r) => { const f = (t) => { ys.push(at()); ts.push(t); t - t0 < 700 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
+  await new Promise((r) => { const f = (t) => { ps.push(prog()); ys.push(at()); ts.push(t); t - t0 < 700 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
   await new Promise((r) => setTimeout(r, 300));
-  ys.push(at()); ts.push(performance.now());
-  return { ys, ts };
+  ys.push(at()); ps.push(null); ts.push(performance.now());
+  return { ys, ps, ts };
 }, watch, click);
 
 let failed = 0;
 const report = {};
-function judge(name, { ys, ts }) {
-  const steps = ys.slice(1).map((y, i) => y - ys[i]);
-  const mag = steps.map(Math.abs);
-  const peak = mag.indexOf(Math.max(...mag));
-  // After the fastest frame an eased slide only slows down; a step that grows again is a jump.
-  let jump = 0;
-  for (let i = peak + 1; i < mag.length; i++) {
-    const prev = Math.max(...mag.slice(Math.max(peak, i - 3), i));
-    if (mag[i] > prev * 1.5 + 2) jump = Math.max(jump, mag[i]);
-  }
-  const moved = mag.filter((m) => m > 0.05).length;
+/**
+ * Where should `watch` be at each frame? A slide's height follows its eased progress, so a frame at progress p
+ * belongs at y0 + (yEnd - y0) * p. Measuring against that (not frame to frame) holds when the emulator
+ * drops frames, and catches the old bug: a slide whose first or last frame isn't where the layout ends up.
+ */
+function judge(name, { ys, ps, ts }) {
+  const y0 = ys[0], y1 = ys.at(-1), d = y1 - y0;
+  let seen = false, worst = 0, at = '';
+  ys.forEach((y, i) => {
+    const p = ps[i];
+    if (p !== null) seen = true;
+    const want = p !== null ? y0 + d * p : seen ? y1 : y0;
+    // Margins and a border that can't animate below 1 px bend the middle a little; the ends must be exact.
+    const err = Math.abs(y - want) / (p !== null && p > 0.05 && p < 0.95 ? 3 : 1);
+    if (err > worst) { worst = err; at = p !== null ? `at ${(p * 100).toFixed(0)}%` : seen ? 'after the slide' : 'before the slide'; }
+  });
+  const frames = ps.filter((p) => p !== null).length;
   const dts = ts.slice(1, -1).map((t, i) => t - ts[i]);
-  const ok = jump === 0 && moved >= 4;
+  const ok = seen && Math.abs(d) > 4 && worst <= 2;
   if (!ok) failed++;
-  report[name] = { ok, jump: +jump.toFixed(1), frames: moved, longestFrameMs: +Math.max(...dts).toFixed(1), steps: steps.map((s) => +s.toFixed(1)) };
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}: ${moved} moving frames, end jump ${jump.toFixed(1)} px, steps ${steps.filter((s) => Math.abs(s) > 0.05).map((s) => s.toFixed(1)).join(' ')}`);
+  report[name] = { ok, moved: +d.toFixed(1), worstOff: +worst.toFixed(1), where: at, frames, longestFrameMs: +Math.max(...dts).toFixed(1), ys: ys.map((y) => +y.toFixed(1)), ps: ps.map((p) => (p === null ? null : +p.toFixed(3))) };
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}: moved ${d.toFixed(0)} px in ${frames} frames, worst ${worst.toFixed(1)} px off (middle frames count 1/3) ${at || ''}${seen ? '' : ' (no slide ran)'}`);
 }
 
 const env = await run(() => ({ reduce: matchMedia('(prefers-reduced-motion: reduce)').matches, w: innerWidth, dpr: devicePixelRatio, fs: getComputedStyle(document.body).fontSize, ua: navigator.userAgent }));
