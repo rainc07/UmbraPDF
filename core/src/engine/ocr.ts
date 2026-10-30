@@ -154,7 +154,7 @@ export async function ocrRedactedRegions(
         const crop = document.createElement('canvas');
         crop.width = Math.max(8, Math.round(r.w * scale));
         crop.height = Math.max(8, Math.round(r.h * scale));
-        crop.getContext('2d')!.drawImage(full, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 0, 0, crop.width, crop.height);
+        crop.getContext('2d', { willReadFrequently: true })!.drawImage(full, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 0, 0, crop.width, crop.height);
         const { data } = await withWorker((m) => onProgress(m, i / pages), (w) => w.recognize(crop));
         const text = data.text.replace(/\s+/g, ' ').trim();
         if (text.length >= 2 && data.confidence >= MIN_CONF) leaks.push({ page: i + 1, text, confidence: data.confidence });
@@ -591,7 +591,7 @@ export function resetOcrStats(): void { lastOcrStats.passes = 0; lastOcrStats.ca
 function cropCanvas(src: HTMLCanvasElement, x: number, y: number, w: number, h: number, k = 1): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
-  c.getContext('2d')!.drawImage(src, x, y, w, h, 0, 0, c.width, c.height);
+  c.getContext('2d', { willReadFrequently: true })!.drawImage(src, x, y, w, h, 0, 0, c.width, c.height);
   return c;
 }
 const shiftWord = (w: OcrWord, dx: number, dy: number, k = 1): OcrWord => {
@@ -639,7 +639,7 @@ async function readWithCards(canvas: HTMLCanvasElement, quads: { q: Quad; sure: 
   const k = Math.min(1, Math.sqrt(AROUND_CARDS_PIXELS / (W * H)));
   const rest = document.createElement('canvas');
   rest.width = Math.round(W * k); rest.height = Math.round(H * k);
-  const rg = rest.getContext('2d')!;
+  const rg = rest.getContext('2d', { willReadFrequently: true })!;
   rg.drawImage(canvas, 0, 0, rest.width, rest.height);
   rg.fillStyle = '#fff';
   for (const { q } of quads) { rg.beginPath(); q.forEach(([x, y], i) => (i ? rg.lineTo(x * k, y * k) : rg.moveTo(x * k, y * k))); rg.closePath(); rg.fill(); }
@@ -756,7 +756,7 @@ export async function recognizeWordsRobust(canvas: HTMLCanvasElement, onStatus: 
     const k = Math.min(1, 1400 / Math.max(canvas.width, canvas.height));
     const small = document.createElement('canvas');
     small.width = Math.round(canvas.width * k); small.height = Math.round(canvas.height * k);
-    small.getContext('2d')!.drawImage(canvas, 0, 0, small.width, small.height);
+    small.getContext('2d', { willReadFrequently: true })!.drawImage(canvas, 0, 0, small.width, small.height);
     const full: Quad = [[0, 0], [small.width, 0], [small.width, small.height], [0, small.height]];
     let base = score(await recognizeWords(small, onStatus, 30)), turn = 0;
     t.passes++;
