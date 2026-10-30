@@ -27,7 +27,8 @@ async function waitFor(sel, ms = 15000) {
   for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200))
     if (await run((s) => { const e = document.querySelector(s); return !!e && !e.disabled; }, sel)) return;
   const seen = await run(() => document.querySelector('.modal:not([hidden]), #panel:not([hidden])')?.innerText?.slice(0, 300) ?? document.body.className);
-  throw new Error(`${sel} never appeared; on screen: ${seen}`);
+  const errs = await run(() => window.__errs ?? []);
+  throw new Error(`${sel} never appeared; on screen: ${seen}; page errors: ${JSON.stringify(errs)}`);
 }
 
 /** Clicks `click`, then records `watch`'s top every frame until it has settled. */
@@ -84,6 +85,7 @@ await run(() => document.querySelector('#s-close').click());
 await sleep(500);
 
 // A document with a scanned page (a picture of text, so Auto Detect reads it with OCR) and a text page.
+await run(() => { window.__errs = []; addEventListener('error', (e) => window.__errs.push(String(e.message))); addEventListener('unhandledrejection', (e) => window.__errs.push(String(e.reason?.stack ?? e.reason))); });
 await run(async () => {
   const c = document.createElement('canvas'); c.width = 1275; c.height = 1650;
   const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#111'; g.font = '34px sans-serif';
@@ -106,8 +108,9 @@ await run(async () => {
   const x = len;
   put(`xref\n0 9\n0000000000 65535 f \n${offs.slice(1).map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n${x}\n%%EOF\n`);
   const all = new Uint8Array(len); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
-  await window.__umbraTest.load(all);
-});
+  try { await window.__umbraTest.load(all); } catch (e) { return `load failed: ${e?.stack ?? e}`; }
+  return 'loaded';
+}).then((r) => console.log(r));
 await waitFor('#btn-export');
 await sleep(2500);
 

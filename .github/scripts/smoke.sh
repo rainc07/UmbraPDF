@@ -31,6 +31,12 @@ for scale in 1.0 1.3; do
   adb shell am start -W -n "$pkg/app.umbrapdf.MainActivity" >/dev/null
   sleep 12
   pid=$(adb shell pidof "$pkg" | tr -d '\r')
+  sock=""
+  for _ in $(seq 20); do
+    sock=$(adb shell cat /proc/net/unix | grep -o "webview_devtools_remote_$pid" | head -1)
+    [ -n "$sock" ] && break; sleep 1
+  done
+  echo "DevTools socket: ${sock:-none} (pid $pid)"
   adb forward --remove-all
   adb forward tcp:9222 "localabstract:webview_devtools_remote_$pid"
   adb shell screenrecord --time-limit 60 "/sdcard/motion-$scale.mp4" & rec=$!
