@@ -790,6 +790,23 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
   check(!/850505/.test(r.pages2[1] ?? '') && /Public line/.test(r.pages2[1] ?? '') && !/GHOSTWORD|BARWORD/.test(r.pages2.join(' ')), `reused OCR on the page with boxes: boxed value absent, rest searchable ("${(r.pages2[1] ?? '').slice(0, 80)}")`);
 }
 
+// Pages render without animation frames: phones with a variable refresh rate fire them at 1-10 Hz while the
+// screen is still, which made exports crawl until the user touched the screen.
+{
+  const r = await page.evaluate(async (arr) => {
+    const T = window.__umbraTest;
+    await T.load(new Uint8Array(arr));
+    const raf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0; // frames never come
+    try {
+      const t0 = performance.now();
+      const out = await Promise.race([T.export({ dpi: 150 }, false), new Promise((r) => setTimeout(() => r(null), 20000))]);
+      return { done: !!out, ms: Math.round(performance.now() - t0) };
+    } finally { window.requestAnimationFrame = raf; }
+  }, Array.from(fixture));
+  check(r.done, `export finishes without animation frames (${r.ms} ms)`);
+}
+
 await browser.close();
 server.close();
 console.log(failed ? `\n${failed} check(s) failed` : '\nALL CHECKS PASSED');
