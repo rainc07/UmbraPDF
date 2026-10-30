@@ -7,6 +7,8 @@ interface AndroidBridge {
   beginSave(): string;
   appendChunk(id: string, base64: string): boolean;
   commitSave(id: string, suggestedName: string): void;
+  /** Several staged files into a folder the user picks (JSON arrays of tokens and names). */
+  commitSaveAll?(idsJson: string, namesJson: string): void;
   release(token: string): void;
   getPrefs?(): string;
   setPrefs?(json: string): void;
@@ -27,6 +29,7 @@ interface AndroidBridge {
 interface HostCallbacks {
   onPicked(json: string): void;
   onSaved(json: string): void;
+  onSavedAll?(json: string): void;
   onInsets?(json: string): void;
   onSystemTheme?(dark: boolean): void;
   /** Called by Kotlin on Back; return value comes back through evaluateJavascript. */
@@ -53,6 +56,7 @@ export function createAndroidHost(): Host | null {
 
   let pendingPick: ((f: OpenedFile | null) => void) | null = null;
   let pendingSave: ((ok: boolean) => void) | null = null;
+  let pendingSaveAll: ((n: number | false) => void) | null = null;
   let externalCb: ((f: OpenedFile) => void) | null = null;
   let insetsCb: ((i: Insets) => void) | null = null;
   let themeCb: ((dark: boolean) => void) | null = null;
@@ -101,6 +105,11 @@ export function createAndroidHost(): Host | null {
       pendingSave?.(msg.ok);
       pendingSave = null;
     },
+    onSavedAll: (json) => {
+      const msg = JSON.parse(json) as { ok: boolean; count: number };
+      pendingSaveAll?.(msg.ok ? msg.count : false);
+      pendingSaveAll = null;
+    },
     onInsets: (json) => { const i = parseInsets(json); if (i) insetsCb?.(i); },
     onSystemTheme: (dark) => themeCb?.(dark),
     onBack: () => (backCb ? backCb() : false),
@@ -131,6 +140,21 @@ export function createAndroidHost(): Host | null {
         pendingSave = resolve;
         bridge.commitSave(id, name);
       }),
+    saveFiles: bridge.commitSaveAll
+      ? (_zipName, files) =>
+        new Promise((resolve) => {
+          const ids: string[] = [];
+          for (const f of files) {
+            const id = bridge.beginSave();
+            ids.push(id);
+            for (let i = 0; i < f.bytes.length; i += CHUNK) {
+              if (!bridge.appendChunk(id, toBase64(f.bytes.subarray(i, i + CHUNK)))) { ids.forEach((t) => bridge.release(t)); return resolve(false); }
+            }
+          }
+          pendingSaveAll = resolve;
+          bridge.commitSaveAll!(JSON.stringify(ids), JSON.stringify(files.map((f) => f.name)));
+        })
+      : undefined,
     onExternalOpen: (cb) => { externalCb = cb; bridge.ready(); },
     // Optional chaining: an older shell without these methods still works.
     loadPrefs: () => { try { return bridge.getPrefs?.() || null; } catch { return null; } },

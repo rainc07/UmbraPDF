@@ -3,7 +3,7 @@ import {
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject,
   beginText, endText, setFontAndSize, setTextRenderingMode, setCharacterSqueeze, setTextMatrix, showText,
 } from 'pdf-lib';
-import { recognizeWordsRobust, type OcrWord } from './ocr';
+import { lastOcrStats, recognizeWordsRobust, type OcrWord } from './ocr';
 import { renderToCanvas, type PDFDocumentProxy } from './pdf';
 import { scanDpi } from './search';
 import type { ExportOptions, ExportResult, Progress, RedactionMap, Rect } from './types';
@@ -57,6 +57,34 @@ function visibleFragments(words: OcrWord[], boxesPx: [number, number, number, nu
     if (run.length) flush();
   }
   return out;
+}
+
+/**
+ * Words (canvas pixels) with printed ink under them: some pixels clearly darker than the paper around them.
+ * Text-layer words over blank paper, a flat colour (e.g. under a drawn black bar) or off the page are dropped.
+ */
+const INK_DELTA = 60;        // luma below the paper level that counts as ink
+const MIN_INK = 0.03;        // fraction of the word box
+function inkedWords(ctx: CanvasRenderingContext2D, words: OcrWord[]): OcrWord[] {
+  if (!words.length) return words;
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const d = ctx.getImageData(0, 0, W, H).data; // one read: per-word reads stall on a GPU canvas
+  return words.filter((w) => {
+    const x0 = Math.max(0, Math.floor(w.x0)), y0 = Math.max(0, Math.floor(w.y0));
+    const x1 = Math.min(W, Math.ceil(w.x1)), y1 = Math.min(H, Math.ceil(w.y1));
+    if (x1 - x0 < 2 || y1 - y0 < 3) return false;
+    const hist = new Uint32Array(256);
+    const n = (x1 - x0) * (y1 - y0);
+    for (let y = y0; y < y1; y++) {
+      for (let k = (y * W + x0) * 4, e = (y * W + x1) * 4; k < e; k += 4) hist[(d[k] * 77 + d[k + 1] * 150 + d[k + 2] * 29) >> 8]++;
+    }
+    // Paper level: the 85th percentile of brightness (letters cover well under 85% of a word's box).
+    let acc = 0, paper = 255;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * 0.85) { paper = v; break; } }
+    let dark = 0;
+    for (let v = 0; v < Math.max(0, paper - INK_DELTA); v++) dark += hist[v];
+    return dark >= n * MIN_INK;
+  });
 }
 
 /** Keep only characters the standard (non-embedded) Helvetica can encode. */
@@ -238,8 +266,11 @@ export async function exportRedacted(
   redactions: RedactionMap,
   opts: ExportOptions,
   onProgress: Progress = () => {},
-  /** Already-read text of a page (page points), reused for the searchable layer instead of a new OCR pass. */
-  textFor?: (pageIndex: number) => Promise<OcrWord[] | null>,
+  /**
+   * Already-known text of a page (page points), reused for the searchable layer instead of a new OCR pass.
+   * layer: it came from the PDF's own text layer (may hold text nobody sees), not from OCR of the pixels.
+   */
+  textFor?: (pageIndex: number) => Promise<{ words: OcrWord[]; layer: boolean } | null>,
 ): Promise<ExportResult> {
   const out = await PDFDocument.create({ updateMetadata: false });
   const downscaled: ExportResult['downscaled'] = [];
@@ -249,6 +280,8 @@ export async function exportRedacted(
 
   for (let i = 1; i <= n; i++) {
     onProgress(`Rasterizing page ${i}/${n}`, (i - 1) / n);
+    const tp = performance.now();
+    let tText = 0, how = 'no text layer';
     const page = await src.getPage(i);
     const base = page.getViewport({ scale: 1 });
 
@@ -270,18 +303,26 @@ export async function exportRedacted(
       for (const b of boxesPx) ctx.fillRect(...b);
 
       let words: OcrWord[] = [];
-      // Scanned pages: reuse the OCR text read for search/Auto Detect (read now if it wasn't yet), minus
-      // everything under a box. It came from the same pixels. Pages with a real text layer are read again
-      // from their pixels instead: their stored text can include text that isn't visible.
-      const known = opts.searchable && textFor ? await textFor(i - 1) : null;
+      // Reuse text already known for the page, minus everything under or near a box: OCR read for search/Auto
+      // Detect (same pixels), or the PDF's own text layer. A text layer may hold text nobody sees, possibly a copy
+      // of what was boxed placed elsewhere, so it's only reused on pages without boxes, and only words with
+      // printed ink under them. Pages with boxes are read again from their pixels.
+      const tt = performance.now();
+      let known = opts.searchable && textFor ? await textFor(i - 1) : null;
+      if (known?.layer && boxesPx.length) known = null;
       if (known) {
+        tText = performance.now() - tt;
         onProgress(`Reading text on page ${i}/${n}`, (i - 0.75) / n);
         const px = (v: number) => v * scale;
-        const pts = known;
-        words = visibleFragments(pts.map((w) => ({
+        words = visibleFragments(known.words.map((w) => ({
           ...w, x0: px(w.x0), y0: px(w.y0), x1: px(w.x1), y1: px(w.y1),
           symbols: w.symbols.map((sy) => ({ ...sy, x0: px(sy.x0), y0: px(sy.y0), x1: px(sy.x1), y1: px(sy.y1) })),
         })), boxesPx, true); // read from the unredacted pixels
+        if (known.layer) {
+          const all = words.length;
+          words = inkedWords(ctx, words);
+          how = `text layer reused (${words.length}/${all} words on ink)`;
+        } else how = 'text read before (reused)';
       } else if (opts.searchable) {
         onProgress(`Reading text on page ${i}/${n}`, (i - 0.75) / n);
         // OCR a copy at most 300 DPI (4x fewer pixels at 600 DPI) with the boxes painted WHITE:
@@ -294,7 +335,10 @@ export async function exportRedacted(
         c2.drawImage(canvas, 0, 0, src.width, src.height);
         c2.fillStyle = '#fff';
         for (const b of boxesPx) c2.fillRect(Math.floor(b[0] * k) - 1, Math.floor(b[1] * k) - 1, Math.ceil(b[2] * k) + 2, Math.ceil(b[3] * k) + 2);
-        const raw = await recognizeWordsRobust(src, (m) => onProgress(m, (i - 0.75) / n));
+        // Pages with a text layer get a plain read, no card search (scans reuse what was read).
+        // A whole page of print otherwise looks like one big card and is read twice.
+        const raw = await recognizeWordsRobust(src, (m) => onProgress(m, (i - 0.75) / n), true, !textFor);
+        tText = performance.now() - tt; how = `read now (${src.width}x${src.height})`;
         src.width = src.height = 0;
         const up = (v: number) => v / k;
         words = visibleFragments(k < 1 ? raw.map((w) => ({
@@ -328,6 +372,7 @@ export async function exportRedacted(
         addTextLayer(p, font, fontName, words, boxesPx, canvas.width, canvas.height, base.width, base.height);
         ocrWords += words.length;
       }
+      lastOcrStats.log.push(`export page ${i}: ${Math.round(performance.now() - tp)} ms, text ${how} ${Math.round(tText)} ms, ${canvas.width}x${canvas.height}`);
     } finally {
       canvas.width = canvas.height = 0; // release GPU/heap memory early
       page.cleanup();

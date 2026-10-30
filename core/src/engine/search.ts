@@ -354,6 +354,20 @@ export class PageTextCache {
     }
     return p;
   }
+  /**
+   * The page's text without new OCR where that can be avoided: what was already extracted, or for a scan that
+   * carries its own (invisible) text layer just that layer, not a second read of the picture.
+   */
+  async known(index: number): Promise<PageText> {
+    const p = this.m.get(index);
+    if (p) return p;
+    const page = await this.doc.getPage(index + 1);
+    if (await scanDpi(page).catch(() => null)) {
+      const t = await textLayer(page, index);
+      if (t.text.replace(/\s/g, '').length >= MIN_TEXT_CHARS) return t;
+    }
+    return this.get(index);
+  }
 }
 
 // ---------- matching ----------

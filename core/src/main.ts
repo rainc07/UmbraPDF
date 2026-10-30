@@ -3,9 +3,9 @@ import {
   openPdf, closePdf, pageSizes, renderToCanvas, exportRedacted, verifyOutput, ocrRedactedRegions,
   PasswordRequiredError, DEFAULT_EXPORT,
   PageTextCache, pageTextWords, searchDocument, exportVector, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
-  normAlways, ALWAYS_MAX,
+  normAlways, ALWAYS_MAX, splitPdf, planSplit, SplitRangeError,
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
-  type Hit, type SearchPattern, type CustomPattern,
+  type Hit, type SearchPattern, type CustomPattern, type SplitSpec, type SplitPart,
 } from './engine';
 import { lastOcrStats, resetOcrStats, setOcrEngine, warmUpOcr } from './engine/ocr';
 import { abortable, isAbort } from './engine/search';
@@ -48,6 +48,8 @@ const S = {
   applied: [] as Sugg[], // items redacted from Find/Auto Detect this session (Redacted tab: untick to un-redact)
   bytes: null as Uint8Array | null, // original file, for "Keep original text" export
   password: undefined as string | undefined,
+  /** The last redacted copy that passed the safety check, and what it was made from (boxes + settings). */
+  verified: null as { key: string; out: ExportOutcome } | null,
 };
 
 // ---------- UI helpers ----------
@@ -144,6 +146,7 @@ async function loadFile(file: OpenedFile) {
   S.name = file.name.replace(/\.pdf$/i, '') || 'document';
   S.bytes = file.bytes;
   S.password = password;
+  S.verified = null;
   S.applied = [];
   S.sizes = await pageSizes(doc);
   S.boxes = S.sizes.map(() => []);
@@ -1251,7 +1254,7 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
   const lap = (name: string) => { const t = performance.now(); timings.push([name, t - t0]); t0 = t; };
   const res = method === 'vector'
     ? { bytes: await exportVector(S.bytes!, S.password, S.boxes, onProgress), downscaled: [], ocrWords: 0 }
-    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.get(i).then((pt) => (pt.source === 'ocr' ? pageTextWords(pt) : null)) : undefined);
+    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr' })) : undefined);
   lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
   const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
   lap('Structure check');
@@ -1286,8 +1289,15 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
     }
     lap('Black-box check');
   }
-  return { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords, timings };
+  const out = { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords, timings };
+  // Kept so Split (or Export again) with the same boxes and settings needn't redo the redaction and its checks.
+  S.verified = ocr && report.ok ? { key: exportKey(opts, method), out } : null;
+  return out;
 }
+
+/** What a redacted copy depends on: the boxes and the export settings that shape it. */
+const exportKey = (opts: ExportOptions, method: 'vector' | 'image') =>
+  JSON.stringify([method, method === 'image' ? [opts.dpi, opts.format, opts.jpegQuality, opts.maxPixels, opts.searchable] : 0, S.boxes]);
 
 const ICON_OK = '<svg class="ico" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_BAD = '<svg class="ico" viewBox="0 0 24 24"><path d="M12 7v6M12 17h.01"/></svg>';
@@ -1317,8 +1327,15 @@ function exportDialog() {
       <small class="hint">Reads the visible text on your device so you can copy and search it. Blacked-out parts are never included.</small></span>
       <input id="x-search" class="switch" type="checkbox" ${prefs.export.searchable ? 'checked' : ''}></label>
     </div>
+    <label class="row2"><span>Split into several files
+      <small class="hint">Per page, by page ranges, or each page cut in half. Pages are cut from the checked copy.</small></span>
+      <input id="x-split" class="switch" type="checkbox"></label>
+    <div id="x-split-opts" hidden>${splitOptionsHtml(S.sizes.length)}</div>
     <div class="row"><button id="x-cancel">Cancel</button><button id="x-go" class="primary">Continue</button></div>`, true);
   let method = m0;
+  const splitOn = () => $<HTMLInputElement>('#x-split').checked;
+  const split = bindSplitOptions(S.sizes.length, splitOn, $<HTMLButtonElement>('#x-go'));
+  $('#x-split').onchange = () => { $('#x-split-opts').hidden = !splitOn(); split.refresh(); };
   const DESC = {
     vector: 'Recommended. Text, shapes and image parts under your boxes are removed from the file itself; everything else stays as real text, so the copy looks like the original, stays small and is fully searchable.',
     image: 'Maximum safety. Every page becomes a picture with your boxes burned in and nothing else from the original is kept. Larger files; text is searchable only with OCR.',
@@ -1348,34 +1365,60 @@ function exportDialog() {
       searchable: $<HTMLInputElement>('#x-search').checked,
     };
     prefs.export = { dpi: opts.dpi, compression: opts.format, searchable: opts.searchable, method }; savePrefs();
+    const spec = splitOn() ? split.spec() : null;
     modal(`<h2>Preparing your copy…</h2><p id="x-msg" class="hint">Starting</p><progress id="x-bar" max="1" value="0"></progress>`);
     S.busy = true; syncToolbar();
     const w = startWork('Preparing your redacted copy');
     try {
-      const out = await runExport({ ...opts, searchable: method === 'image' && opts.searchable }, true, (m, f) => {
+      const xo: ExportOptions = { ...opts, searchable: method === 'image' && opts.searchable };
+      // Exported already with these boxes and settings (e.g. once whole, now split): reuse that checked copy.
+      const done = S.verified?.key === exportKey(xo, method) ? S.verified.out : null;
+      const out = done ?? await runExport(xo, true, (m, f) => {
         const msg = document.getElementById('x-msg'); if (msg && prefs.advanced) msg.textContent = m;
         else if (msg) msg.textContent = f < 1 ? 'Making the pages…' : 'Checking it\'s safe…';
         const bar = document.getElementById('x-bar') as HTMLProgressElement | null; if (bar) bar.value = f;
         w.progress(f < 1 ? 'Making the pages' : 'Checking it\'s safe', f);
       }, method);
+      if (out.report.ok && spec) {
+        // Never cut the original: only the redacted copy that just passed the safety check.
+        const t0 = performance.now();
+        const parts = await splitPdf(out.bytes, undefined, spec);
+        const timings: [string, number][] = [...(done ? [['Redacted copy reused', 0] as [string, number]] : out.timings), ['Split', performance.now() - t0]];
+        w.done('Ready to save', 'Your redacted copy passed the safety check and is split. Tap to save it.');
+        splitResult(parts, timings);
+        return;
+      }
       w.done(out.report.ok ? 'Ready to save' : 'Not saved, to keep you safe', out.report.ok ? 'Your redacted copy passed the safety check. Tap to save it.' : 'The final check found a problem. Open Umbra PDF for details.');
       resultDialog(out);
     } catch (e) {
       w.done('Export stopped', 'Something went wrong. Open Umbra PDF for details.');
-      const hidden = (e as Error).name === 'HiddenLayersError', hiddenText = (e as Error).name === 'HiddenTextError';
-      modal(`<div class="big-icon bad">${ICON_BAD}</div><h2>${hidden ? 'This PDF has hidden layers' : hiddenText ? 'This PDF has hidden text' : 'Something went wrong'}</h2>
-        <p class="hint">${hidden
-          ? 'Parts of this file are switched off and never shown, so they couldn\'t be reviewed. Nothing was saved. Export again with "Image only", which keeps only what you can see.'
-          : hiddenText
-            ? 'A page you redacted also has text you can\'t see (for example a scan\'s text layer), and it may not line up with your boxes. Nothing was saved. Export again with "Image only", which keeps only what you can see and can still make it searchable.'
-            : 'Nothing was saved. Try again, or pick a lower quality if the file is very large.'}</p>
-        <details><summary>Details</summary><p>${esc((e as Error).message)}</p></details>
-        <div class="row"><button id="r-close">Close</button></div>`, true);
-      $('#r-close').onclick = closeModal;
+      exportFailed(e);
     } finally {
       S.busy = false; syncToolbar();
     }
   };
+}
+
+/** Export threw (nothing was saved): say why, and what to do. */
+function exportFailed(e: unknown) {
+  const hidden = (e as Error).name === 'HiddenLayersError', hiddenText = (e as Error).name === 'HiddenTextError';
+  modal(`<div class="big-icon bad">${ICON_BAD}</div><h2>${hidden ? 'This PDF has hidden layers' : hiddenText ? 'This PDF has hidden text' : 'Something went wrong'}</h2>
+    <p class="hint">${hidden
+      ? 'Parts of this file are switched off and never shown, so they couldn\'t be reviewed. Nothing was saved. Export again with "Image only", which keeps only what you can see.'
+      : hiddenText
+        ? 'A page you redacted also has text you can\'t see (for example a scan\'s text layer), and it may not line up with your boxes. Nothing was saved. Export again with "Image only", which keeps only what you can see and can still make it searchable.'
+        : 'Nothing was saved. Try again, or pick a lower quality if the file is very large.'}</p>
+    <details><summary>Details</summary><p>${esc((e as Error).message)}</p></details>
+    <div class="row"><button id="r-close">Close</button></div>`, true);
+  $('#r-close').onclick = closeModal;
+}
+
+/** OCR and per-page timings (Advanced), with a Copy button: what's needed to tell where time goes. */
+function ocrLogHtml(): string {
+  const log = lastOcrStats.log.slice(-80);
+  if (!log.length) return '';
+  return `<details><summary>OCR timings</summary><pre id="ocr-log" style="white-space:pre-wrap;font-size:11px">${esc(`${navigator.hardwareConcurrency || '?'} CPU cores\n${log.join('\n')}`)}</pre>
+    <button type="button" data-copy-log>Copy timings</button></details>`;
 }
 
 function technicalReport({ bytes, report, downscaled, ocrWords, timings }: ExportOutcome): string {
@@ -1392,7 +1435,7 @@ function technicalReport({ bytes, report, downscaled, ocrWords, timings }: Expor
     ...(report.notes ?? []),
     ...downscaled.map((d) => `Page ${d.page} reduced to ${d.dpi} DPI to fit memory`),
     ...report.issues.map((i) => `ISSUE: ${i}`),
-  ].map(li).join('')}</ul>`;
+  ].map(li).join('')}</ul>${ocrLogHtml()}`;
 }
 
 function resultDialog(out: ExportOutcome) {
@@ -1419,6 +1462,114 @@ function resultDialog(out: ExportOutcome) {
       <div class="row"><button id="r-close">Close</button></div>`, true);
     $('#r-close').onclick = closeModal;
   }
+}
+
+// ---------- Split ----------
+let lastSplit: SplitSpec & { every: number; ranges: string; cut: 'lr' | 'tb'; rtl: boolean; widerOnly: boolean } =
+  { mode: 'every', every: 1, ranges: '', cut: 'lr', rtl: false, widerOnly: true };
+
+const sizeText = (n: number) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+/** Split options inside the Export dialog. */
+function splitOptionsHtml(n: number): string {
+  const L = lastSplit;
+  return `<div class="segctl" id="sp-mode">
+      <button data-m="every">Per page</button><button data-m="ranges">Ranges</button><button data-m="half">Halves</button></div>
+    <div id="sp-every">
+      <label class="row2"><span>Pages in each file</span><input id="sp-n" type="number" min="1" max="${n}" value="${Math.min(L.every, n)}" inputmode="numeric" style="width:6em"></label>
+    </div>
+    <div id="sp-ranges">
+      <p class="hint">One file per range, for example <b>1-3, 4, 8-</b> (8- means 8 to the end). Pages not listed are left out.</p>
+      <input id="sp-r" placeholder="1-3, 4, 8-" autocomplete="off" spellcheck="false" inputmode="text" enterkeyhint="done" value="${esc(L.ranges)}" style="width:100%">
+    </div>
+    <div id="sp-half">
+      <p class="hint">For scans with two pages side by side. You get one PDF with every page cut in two.</p>
+      <div class="segctl" id="sp-cut"><button data-c="lr">Left | Right</button><button data-c="tb">Top / Bottom</button></div>
+      <label class="row2"><span>Only cut pages that are wider than tall
+        <small class="hint">A cover or single page in the scan stays whole.</small></span>
+        <input id="sp-wide" class="switch" type="checkbox" ${L.widerOnly ? 'checked' : ''}></label>
+      <label class="row2" id="sp-rtl-row"><span>Right page first
+        <small class="hint">For books read right to left.</small></span>
+        <input id="sp-rtl" class="switch" type="checkbox" ${L.rtl ? 'checked' : ''}></label>
+    </div>
+    <p class="note" id="sp-plan"></p>`;
+}
+
+/** Wire the split options; `go` is disabled while they don't make sense. Returns the chosen split. */
+function bindSplitOptions(n: number, active: () => boolean, go: HTMLButtonElement): { spec: () => SplitSpec; refresh: () => void } {
+  let mode = lastSplit.mode, cut = lastSplit.cut;
+  const spec = (): SplitSpec => mode === 'every'
+    ? { mode, every: Math.max(1, Math.min(n, Math.floor(Number($<HTMLInputElement>('#sp-n').value) || 1))) }
+    : mode === 'ranges' ? { mode, ranges: $<HTMLInputElement>('#sp-r').value }
+    : { mode, cut, rtl: cut === 'lr' && $<HTMLInputElement>('#sp-rtl').checked, widerOnly: $<HTMLInputElement>('#sp-wide').checked };
+  const show = () => {
+    for (const m of ['every', 'ranges', 'half']) $(`#sp-${m}`).hidden = m !== mode;
+    $('#sp-mode').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === mode)));
+    $('#sp-cut').querySelectorAll<HTMLElement>('[data-c]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.c === cut)));
+    $('#sp-rtl-row').hidden = cut !== 'lr';
+    $('#sp-wide').closest('label')!.querySelector('span')!.firstChild!.textContent = cut === 'lr' ? 'Only cut pages that are wider than tall' : 'Only cut pages that are taller than wide';
+    const plan = $('#sp-plan');
+    let ok = true;
+    try {
+      const s = spec();
+      if (s.mode === 'half') {
+        const cuts = S.sizes.filter((z) => !s.widerOnly || (s.cut === 'lr' ? z.width > z.height : z.height > z.width)).length;
+        plan.textContent = cuts ? `1 file, ${n + cuts} pages (${cuts} of ${n} cut in half)` : `No page is ${s.cut === 'lr' ? 'wider than tall' : 'taller than wide'}, so nothing would be cut.`;
+        ok = cuts > 0;
+      } else {
+        const parts = planSplit(s, n);
+        const names = parts.slice(0, 4).map((p) => (p.length === 1 ? `${p[0] + 1}` : `${p[0] + 1}-${p[p.length - 1] + 1}`)).join(', ');
+        plan.textContent = `${parts.length} file${parts.length === 1 ? '' : 's'}: pages ${names}${parts.length > 4 ? ', …' : ''}`;
+      }
+      plan.classList.remove('fail');
+    } catch (e) {
+      plan.textContent = e instanceof SplitRangeError ? e.message : String(e);
+      plan.classList.add('fail');
+      ok = false;
+    }
+    go.disabled = active() && !ok;
+  };
+  $('#sp-mode').onclick = (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]'); if (b) { mode = b.dataset.m as typeof mode; show(); } };
+  $('#sp-cut').onclick = (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-c]'); if (b) { cut = b.dataset.c as typeof cut; show(); } };
+  for (const id of ['#sp-n', '#sp-r', '#sp-wide', '#sp-rtl']) $(id).addEventListener('input', show);
+  show();
+  return { spec: () => { const v = spec(); lastSplit = { ...lastSplit, ...v }; return v; }, refresh: show };
+}
+
+function splitResult(parts: SplitPart[], timings: [string, number][] = []) {
+  const base = `${S.name}-redacted`;
+  const files = parts.map((p) => ({ name: `${base}-${p.label}.pdf`, bytes: p.bytes }));
+  const bytes = files.reduce((k, f) => k + f.bytes.length, 0);
+  const multi = files.length > 1;
+  modal(`<div class="big-icon ok">${ICON_OK}</div><h2>${multi ? `${files.length} files ready` : 'Ready'}</h2>
+    <p class="hint">Cut from your redacted copy, which passed the safety check. ${multi
+      ? host.name === 'android' ? 'Pick a folder and they\'re all saved there.' : 'Pick a folder, or they download as one ZIP.' : ''}</p>
+    <p class="note">${multi ? `${esc(files[0].name)} … ${esc(files[files.length - 1].name)}` : esc(files[0].name)} · ${sizeText(bytes)}</p>
+    ${prefs.advanced && timings.length ? `<details open><summary>Technical report</summary><ul><li>Time: ${esc(timings.map(([n, ms]) => `${n} ${(ms / 1000).toFixed(1)} s`).join(', '))}</li></ul>${ocrLogHtml()}</details>` : ''}
+    <div class="row"><button id="r-close">Cancel</button><button id="r-save" class="primary">${multi ? 'Save files' : 'Save PDF'}</button></div>`, true);
+  $('#r-close').onclick = closeModal;
+  $('#r-save').onclick = async () => {
+    let saved: number | false = false;
+    try {
+      saved = multi && host.saveFiles ? await host.saveFiles(`${base}-split.zip`, files)
+        : multi ? await saveOneByOne(files)
+        : (await host.savePdf(files[0].name, files[0].bytes)) ? 1 : false;
+    } catch (e) {
+      closeModal();
+      toast(`Save failed: ${(e as Error).message}`, 5000);
+      return;
+    }
+    if (saved) S.dirty = false;
+    closeModal();
+    toast(saved === false ? 'Save cancelled' : `Saved ${saved} file${saved === 1 ? '' : 's'}`);
+  };
+}
+
+/** A host that can only save one file at a time: ask for each. */
+async function saveOneByOne(files: OpenedFile[]): Promise<number | false> {
+  let n = 0;
+  for (const f of files) { if (!(await host.savePdf(f.name, f.bytes))) break; n++; }
+  return n || false;
 }
 
 // ---------- Wiring ----------
@@ -1450,6 +1601,11 @@ $('#btn-settings').onclick = settingsDialog;
 $('#zoom-in').onclick = () => setZoom(S.zoom * 1.25);
 $('#zoom-out').onclick = () => setZoom(S.zoom / 1.25);
 $('#btn-export').onclick = () => S.doc && !S.busy && exportDialog();
+// "Copy timings" in a technical report (inline handlers are blocked by the CSP).
+document.addEventListener('click', (e) => {
+  if (!(e.target as HTMLElement).closest('[data-copy-log]')) return;
+  void navigator.clipboard?.writeText(document.getElementById('ocr-log')?.textContent ?? '').then(() => toast('Copied'), () => toast('Copy failed'));
+});
 $('#btn-find').onclick = () => (S.panel === 'find' ? closePanel(true) : openFind());
 $('#btn-detect').onclick = () => (S.panel === 'detect' ? closePanel(true) : openDetect());
 document.addEventListener('keydown', (e) => {
@@ -1502,6 +1658,7 @@ syncToolbar();
   sizes: () => S.sizes,
   export: (opts: Partial<ExportOptions> = {}, ocr = false, method: 'vector' | 'image' = 'image') => runExport({ ...DEFAULT_EXPORT, ...opts }, ocr, () => {}, method),
   verifyVector: (bytes: Uint8Array, boxes: Rect[][]) => verifyOutput(bytes, () => {}, { searchable: false, redactions: boxes, mode: 'vector' }),
+  split: async (spec: SplitSpec) => (await splitPdf(S.bytes!, S.password, spec)).map((p) => ({ label: p.label, pages: p.pages, bytes: Array.from(p.bytes) })),
   exportVectorRaw: (boxes: Rect[][], blackBoxes = true) => exportVector(S.bytes!, S.password, boxes, () => {}, { blackBoxes }),
   applied: () => S.applied.map((x) => ({ id: x.id, on: x.on, label: x.label, text: x.text })),
   toggleApplied: (id: number, on: boolean) => toggleApplied(id, on),
@@ -1537,6 +1694,7 @@ syncToolbar();
   removeTerm: async (i: number) => { S.findTerms.splice(i, 1); await searchTerms(); return { terms: S.findTerms.length, hits: S.sugg.length }; },
   removeType: (label: string) => { removeType(label); return S.sugg; },
   setOpt: (k: keyof Options, v: boolean) => { prefs.opts[k] = v; },
+  setAdvanced: (v: boolean) => { prefs.advanced = v; },
   detect: async (enabled: string[], custom: CustomPattern[] = []) => { if (S.panel !== 'detect') openDetect(); await runDetect(enabled, custom); return S.sugg; },
   applyOne: (id: number) => applySugg(S.sugg.filter((x) => x.id === id)),
   applyAll: () => applySugg(S.sugg.filter((x) => x.on)),

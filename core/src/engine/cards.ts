@@ -257,6 +257,21 @@ export function wholeAsCard(canvas: HTMLCanvasElement): Quad | null {
   return W >= H ? q : turnQuad(q, 3); // portrait: card turned 90° (OCR tries 180° too)
 }
 
+const MAX_CARD_ROWS = 24;
+/** Rows of print in a box of the ink map (columns if `cols`): runs of inked lines between blank ones. */
+function printRows(ink: Uint8Array, w: number, x0: number, y0: number, x1: number, y1: number, cols: boolean): number {
+  const [a0, a1, b0, b1] = cols ? [x0, x1, y0, y1] : [y0, y1, x0, x1];
+  const len = Math.max(1, b1 - b0 + 1);
+  let rows = 0, inRow = false;
+  for (let a = a0; a <= a1; a++) {
+    let n = 0;
+    for (let b = b0; b <= b1; b++) n += cols ? ink[b * w + a] : ink[a * w + b];
+    const f = n / len;
+    if (!inRow && f > 0.02) { inRow = true; rows++; } else if (inRow && f <= 0.005) inRow = false;
+  }
+  return rows;
+}
+
 /**
  * Groups of printed content separated by blank paper, as upright rectangles grown by a small margin.
  * For scanner-app pages ("ID card" mode) whose filter whitened the card so its edge is gone: each side of the
@@ -300,6 +315,8 @@ export function contentGroups(canvas: HTMLCanvasElement): Quad[] {
     if (bw < 20 || bh < 12) continue;
     const ar = Math.max(bw, bh) / Math.min(bw, bh);
     if (ar < 1.25 || ar > 2.2 || bw * bh > 0.6 * w * h || bw * bh < 0.01 * w * h) continue;
+    // A block of many lines of print (a page of text) is not a card: a card holds a dozen lines or so.
+    if (Math.max(printRows(ink, w, x0, y0, x1, y1, false), printRows(ink, w, x0, y0, x1, y1, true)) > MAX_CARD_ROWS) continue;
     const mx = 0.05 * bw, my = 0.07 * bh;
     const q: Quad = [[x0 - mx, y0 - my], [x1 + mx, y0 - my], [x1 + mx, y1 + my], [x0 - mx, y1 + my]];
     out.push((bw >= bh ? q : turnQuad(q, 3)).map(([x, y]) => [Math.max(0, Math.min(canvas.width, x / S)), Math.max(0, Math.min(canvas.height, y / S))]) as Quad);

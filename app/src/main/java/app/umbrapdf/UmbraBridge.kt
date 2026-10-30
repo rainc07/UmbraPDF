@@ -2,9 +2,11 @@
 package app.umbrapdf
 
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.webkit.JavascriptInterface
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.FileOutputStream
 import java.util.concurrent.Executors
@@ -20,6 +22,7 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
     @Volatile private var jsReady = false
     @Volatile private var pendingExternal: String? = null
     @Volatile private var pendingSaveToken: String? = null
+    @Volatile private var pendingSaveAll: List<Pair<String, String>>? = null
 
     // ---- Called from JS (JavaBridge thread) ----
 
@@ -52,8 +55,17 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
     @JavascriptInterface
     fun commitSave(token: String, suggestedName: String) {
         pendingSaveToken = token
-        val safe = suggestedName.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120)
-        activity.runOnUiThread { activity.launchCreate(safe) }
+        activity.runOnUiThread { activity.launchCreate(safeName(suggestedName)) }
+    }
+
+    /** A split: several staged files, saved into one folder the user picks. */
+    @JavascriptInterface
+    fun commitSaveAll(tokensJson: String, namesJson: String) {
+        val tokens = JSONArray(tokensJson)
+        val names = JSONArray(namesJson)
+        pendingSaveAll?.forEach { store.release(it.first) }
+        pendingSaveAll = (0 until tokens.length()).map { i -> tokens.getString(i) to safeName(names.optString(i, "part-${i + 1}.pdf")) }
+        activity.runOnUiThread { activity.launchPickFolder() }
     }
 
     @JavascriptInterface
@@ -170,6 +182,36 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
             post("onSaved", JSONObject().put("ok", ok).toString())
         }
     }
+
+    fun finishSaveAll(tree: Uri?) {
+        val files = pendingSaveAll.also { pendingSaveAll = null } ?: return
+        if (tree == null) { files.forEach { store.release(it.first) }; post("onSavedAll", """{"ok":false,"count":0}"""); return }
+        io.execute {
+            var count = 0
+            val ok = try {
+                val dir = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+                for ((token, name) in files) {
+                    // The provider picks a free name if one is taken ("name (1).pdf"), so nothing is overwritten.
+                    val uri = requireNotNull(DocumentsContract.createDocument(activity.contentResolver, dir, "application/pdf", name)) { "cannot create" }
+                    val f = store.get(token) ?: error("missing temp file")
+                    activity.contentResolver.openOutputStream(uri, "wt").use { out ->
+                        requireNotNull(out) { "cannot write" }
+                        f.inputStream().use { it.copyTo(out) }
+                    }
+                    store.release(token)
+                    count++
+                }
+                true
+            } catch (e: Exception) {
+                false
+            } finally {
+                files.forEach { store.release(it.first) }
+            }
+            post("onSavedAll", JSONObject().put("ok", ok).put("count", count).toString())
+        }
+    }
+
+    private fun safeName(name: String) = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120)
 
     fun shutdown() = io.shutdownNow()
 

@@ -75,10 +75,22 @@ Image only options:
 2. Umbra then checks the new file automatically: no copyable text under the boxes (or none at all, if searchable mode is off), no fonts except the plain one used for the searchable layer, no links, forms, attachments or extra file details, and every black box is really solid black in the finished file (any box that isn't is read with OCR, and readable text there fails the check).
 3. If every check passes you'll see **Safe to share**, then **Save PDF** opens the system save dialog. If anything fails, Umbra **does not save** the file.
 
-## 6. Going back
+## 6. Split into several files
+In **Export**, pick **Keep original text** or **Image only** (with or without OCR) as usual, then turn on **Split into several files**:
+- **Per page**: one file for every page, or for every *n* pages ("Pages in each file").
+- **Ranges**: one file per range you type, for example `1-3, 5, 8-` (`8-` means page 8 to the end). Pages you don't list are left out.
+- **Halves**: for scans with two pages side by side. You get one PDF with each page cut into **Left | Right** or **Top / Bottom**. **Only cut pages that are wider than tall** keeps a cover or single page whole, and **Right page first** is for books read right to left.
+
+The parts are always cut from the redacted copy after it passed the safety check, never from the original. Cutting takes a moment: pages are copied, not rendered again, and a cut half keeps the whole page in the file and shows only its half, so the file stays about the size of the copy. Exporting again with the same boxes and settings (for example once whole, then split) reuses the checked copy, so it's almost instant.
+
+**Saving:** on Android, pick a folder and every part is saved there. In the desktop web app, Chrome and Edge ask for a folder too (existing files are never overwritten); other browsers download one ZIP. Files are named after the document, for example `report-redacted-p01.pdf`, `report-redacted-p1-3.pdf` or `report-redacted-halves.pdf`.
+
+**Speed tip:** for a PDF with real text (not a scan), **Keep original text** is fast and stays searchable. **Image only** with OCR reads each page again from its picture, which takes a few seconds per page. Two cases are much quicker: pages Umbra already read (for example with Auto Detect), and pages of a scan that already has its own text layer (most scanner apps add one) with no black box on them. There Umbra reuses that text, keeping only the words printed on the page, and never anything near a box.
+
+## 7. Going back
 The Android **Back** button closes an open dialog or panel first, then returns to the start screen. If you have redactions that haven't been exported, Umbra asks before leaving.
 
-## 7. Settings
+## 8. Settings
 - **Appearance**: System (default), Light or Dark.
 - **Preferences**:
   - **Close the panel after Redact** (on)
