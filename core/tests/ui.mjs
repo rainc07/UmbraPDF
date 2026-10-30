@@ -374,7 +374,15 @@ check(imgHidden && xp.method === 'image' && xp.dpi === 150, `export defaults: sa
   const dlg = await page.evaluate(() => [document.querySelector('#x-method [data-m="image"]').getAttribute('aria-pressed'), document.querySelector('#x-dpi').value,
     document.querySelector('#sp-mode [data-m="none"]').getAttribute('aria-pressed'), document.querySelector('#sp-plan').textContent]);
   check(dlg[0] === 'true' && dlg[1] === '150' && dlg[2] === 'true' && dlg[3] === '1 file, 2 pages', `export dialog starts from the defaults, one file (${dlg})`);
-  await page.click('#x-method [data-m="vector"]');
+  // Phone: the Export sheet keeps its height while options open and close inside it (no edge bouncing at the screen top).
+  const sheetHs = await page.evaluate(async () => {
+    const sh = document.querySelector('#sheet'), hs = new Set([Math.round(sh.getBoundingClientRect().height)]);
+    document.querySelector('#x-method [data-m="vector"]').click();
+    const t0 = performance.now();
+    await new Promise((r) => { const f = () => { hs.add(Math.round(sh.getBoundingClientRect().height)); performance.now() - t0 < 400 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
+    return [...hs];
+  });
+  check(sheetHs.length === 1, `motion: Export sheet height stays put while Image settings close (${sheetHs})`);
   await page.click('#sp-mode [data-m="ranges"]'); await page.fill('#sp-r', '9');
   const bad = await page.evaluate(() => document.querySelector('#x-go').disabled);
   await page.click('#sp-mode [data-m="none"]');
