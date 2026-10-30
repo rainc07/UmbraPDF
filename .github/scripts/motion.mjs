@@ -53,27 +53,28 @@ const track = (watch, click) => run(async (watch, click) => {
 let failed = 0;
 const report = {};
 /**
- * Where should `watch` be at each frame? A slide's height follows its eased progress, so a frame at progress p
- * belongs at y0 + (yEnd - y0) * p. Measuring against that (not frame to frame) holds when the emulator
- * drops frames, and catches the old bug: a slide whose first or last frame isn't where the layout ends up.
+ * A jump is motion the slide doesn't account for. The height follows the slide's eased progress p, so from the
+ * first animated frame back to the start, and from the last one on to where the layout settles, `watch` may
+ * move at most |total| * p and |total| * (1 - p). Anything more is a pop (the old bug: 12 px at the end, Rain's
+ * recording). Measured against progress rather than frame to frame, so the emulator's dropped frames don't matter.
  */
 function judge(name, { ys, ps, ts }) {
-  const y0 = ys[0], y1 = ys.at(-1), d = y1 - y0;
-  let seen = false, worst = 0, at = '';
-  ys.forEach((y, i) => {
-    const p = ps[i];
-    if (p !== null) seen = true;
-    const want = p !== null ? y0 + d * p : seen ? y1 : y0;
-    // Margins and a border that can't animate below 1 px bend the middle a little; the ends must be exact.
-    const err = Math.abs(y - want) / (p !== null && p > 0.05 && p < 0.95 ? 3 : 1);
-    if (err > worst) { worst = err; at = p !== null ? `at ${(p * 100).toFixed(0)}%` : seen ? 'after the slide' : 'before the slide'; }
-  });
-  const frames = ps.filter((p) => p !== null).length;
+  const y0 = ys[0], y1 = ys.at(-1), d = Math.abs(y1 - y0);
+  const idx = ps.map((p, i) => (p !== null ? i : -1)).filter((i) => i >= 0);
+  const frames = idx.length;
+  let startJump = NaN, endJump = NaN, bend = 0;
+  if (frames) {
+    const f = idx[0], l = idx.at(-1);
+    startJump = Math.max(0, Math.abs(ys[f] - y0) - d * ps[f]);
+    endJump = Math.max(0, Math.abs(y1 - ys[l]) - d * (1 - ps[l]));
+    for (const i of idx) bend = Math.max(bend, Math.abs(ys[i] - (y0 + (y1 - y0) * ps[i])));
+  }
   const dts = ts.slice(1, -1).map((t, i) => t - ts[i]);
-  const ok = seen && Math.abs(d) > 4 && worst <= 2;
+  const ok = frames > 0 && d > 4 && startJump <= 2 && endJump <= 2;
   if (!ok) failed++;
-  report[name] = { ok, moved: +d.toFixed(1), worstOff: +worst.toFixed(1), where: at, frames, longestFrameMs: +Math.max(...dts).toFixed(1), ys: ys.map((y) => +y.toFixed(1)), ps: ps.map((p) => (p === null ? null : +p.toFixed(3))) };
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}: moved ${d.toFixed(0)} px in ${frames} frames, worst ${worst.toFixed(1)} px off (middle frames count 1/3) ${at || ''}${seen ? '' : ' (no slide ran)'}`);
+  report[name] = { ok, moved: +(y1 - y0).toFixed(1), startJump: +startJump.toFixed(1), endJump: +endJump.toFixed(1), bend: +bend.toFixed(1), frames,
+    longestFrameMs: +Math.max(...dts).toFixed(1), ys: ys.map((y) => +y.toFixed(1)), ps: ps.map((p) => (p === null ? null : +p.toFixed(3))) };
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}: moved ${(y1 - y0).toFixed(0)} px in ${frames} frames; jump at start ${startJump.toFixed(1)} px, at end ${endJump.toFixed(1)} px (curve within ${bend.toFixed(1)} px)${frames ? '' : ' (no slide ran)'}`);
 }
 
 const env = await run(() => ({ reduce: matchMedia('(prefers-reduced-motion: reduce)').matches, w: innerWidth, dpr: devicePixelRatio, fs: getComputedStyle(document.body).fontSize, ua: navigator.userAgent }));

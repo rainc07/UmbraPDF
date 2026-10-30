@@ -99,7 +99,7 @@ jobs:
       - name: Launch and watch for crashes
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: 35
           arch: x86_64
           target: google_apis
           disable-animations: true
