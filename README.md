@@ -18,7 +18,7 @@ this computer (`127.0.0.1`).
 ## Features
 - **Manual redaction**: draw, select, delete, undo; pinch-zoom and double-tap zoom.
 - **Find & black out**: search across all pages (match case, whole word). Scanned pages are OCR'd on the device first.
-- **Chinese text in scans** (Settings → Text in scans → English + 中文): reads Simplified and Traditional Chinese as well as English, about 1.3x slower per page. English is the default.
+- **Chinese text in scans** (Settings → Text in scans, one switch per language: English, 中文): 中文 reads Simplified and Traditional Chinese as well as English, about 1.3x slower per page. English alone is the default.
 - **Find personal details**: toggleable detectors for Malaysian NRIC, phone, email, card (Luhn-checked), bank account, passport, date of birth, company registration number, LHDN tax number (TIN), names (labelled, table columns, common Malaysian names, IC cards), addresses and vehicle plates, plus custom regex. Pictures inside typed pages (e.g. a pasted IC copy) are OCR'd too. Results are reviewed first: amber = will be redacted, grey = skipped.
 - **Two export methods**:
   - **Keep original text** (default): true redaction with MuPDF. Text, vector shapes fully under a box, and image pixels under each box are removed from the file. Forms and annotation appearances are flattened first, so boxes over them work too. Links, forms, attachments, scripts, metadata, outlines, the structure tree and ActualText/Alt descriptions are stripped. The output looks like the original, stays small and stays selectable.
