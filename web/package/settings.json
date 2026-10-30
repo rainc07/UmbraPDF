@@ -1,0 +1,5 @@
+{
+  "port": 5180,
+  "threads": null,
+  "gpu": false
+}

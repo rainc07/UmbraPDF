@@ -2,6 +2,12 @@
 
 Umbra PDF blacks out (redacts) sensitive parts of a PDF and saves a clean copy. It works fully offline: your files never leave your device, and the app has no internet permission at all.
 
+## 0. Install
+Get the files from the [latest release](https://github.com/rainc07/UmbraPDF/releases/latest) (under *Assets*).
+- **Android:** download `UmbraPDF-<version>.apk`, open it and tap **Install**. If Android asks, allow your browser or Files app to install apps. If Play Protect warns, tap **More details → Install anyway**.
+- **Windows 10/11:** download `UmbraPDF-<version>-Windows-Setup.exe` and run it. If SmartScreen warns, click **More info → Run anyway**. Then open **Umbra PDF** from the Start menu. It opens in your browser at `http://127.0.0.1:5180/`; close its black window to stop it. No installer wanted? Use the `-Windows-Portable.zip`, unzip it and double-click **Umbra PDF.cmd**.
+- **Linux:** unpack `UmbraPDF-<version>-Linux.tar.gz` and run `./umbra-pdf.sh`.
+
 ## 1. Open a PDF
 Tap **Open a PDF** on the start screen. You can also use "Open with → Umbra PDF" from a file manager. Password-protected PDFs ask for the password, which is only kept in memory.
 
