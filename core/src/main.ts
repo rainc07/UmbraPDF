@@ -660,8 +660,8 @@ const OPTION_ROWS: Record<keyof Options, [string, string]> = {
   platesLabelled: ['Vehicle plates only when labelled', 'Only flag plates next to words like “vehicle”, “kenderaan” or “plate”. Fewer false matches.'],
   hideRecents: ['Hide content in Recent apps', 'Blanks the app preview in the app switcher. This also blocks screenshots.'],
 };
-const optRows = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android').map((k) => `<label class="row2"><span>${OPTION_ROWS[k][0]}<small class="hint">${OPTION_ROWS[k][1]}</small></span>
-      <input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}></label>`).join('');
+const optRows = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android').map((k) =>
+  row2(OPTION_ROWS[k][0], `<input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}>`, `opt-${k}`, OPTION_ROWS[k][1])).join('');
 
 // ---------- (?) help ----------
 /** Longer explanations behind the (?) buttons. */
@@ -669,6 +669,7 @@ const HELP = {
   detect: `<p>Auto Detect scans every page, scanned ones too, for IC numbers, phone numbers, emails, bank accounts, addresses, labelled names and more. Nothing is blacked out until you tap Redact, and you can untick anything first.</p>
     <p>Words in “Always redact” (Settings) are found in any case, even when split across lines. To pick which types it looks for, or add your own pattern, open Auto Detect in a document and tap “Choose what to find”.</p>
     <p>It can miss unusual formats, so always look through every page.</p>`,
+  get defaults() { return `<p>What Export starts with. You can still change it each time you export.</p>${this.export}`; },
   ocr: `<p>Scanned pages are pictures, so Umbra reads them on your device (OCR) before Find, Auto Detect or a searchable export can use the text. Nothing is uploaded.</p>
     <p>Each extra language makes scanned pages a little slower to read. Chinese covers Simplified and Traditional, and also reads English.</p>`,
   export: `<p>Every copy goes through a final safety check before you can save it: no hidden text, links, forms, attachments or file details, and nothing readable under the black boxes. If anything fails, Umbra won't save it.</p>
@@ -678,13 +679,18 @@ const HELP = {
     <p><b>File size</b>: Auto picks per page (lossless for clean pages, JPEG for photos and scans). Sharp is always lossless. Photo is always JPEG.</p>
     <p><b>Searchable text</b> reads the visible words on your device and adds them invisibly, so you can copy and search them. Blacked-out parts are never included.</p>`,
   split: `<p>Splitting happens after the safety check, so every file is cut from your checked, redacted copy, never from the original.</p>
-    <p><b>Every N pages</b>: a new file every N pages (1 = one file per page). <b>Ranges</b>: one file per range you type. <b>Halves</b>: one file with each two-page scan cut down the middle.</p>`,
+    <p><b>Every N</b>: a new file every N pages (1 = one file per page).</p>
+    <p><b>Ranges</b>: one file per range, for example 1-3, 4, 8- (8- means 8 to the end). Pages not listed are left out.</p>
+    <p><b>Halves</b>: for scans with two pages side by side. You get one PDF with every page cut in two.</p>`,
   find: `<p>Search for any word or phrase. Each search stays as a filter you can remove with ×. Match case and Whole word narrow the results.</p>
     <p>Scanned pages are read with OCR first, so the first search on a scan can take longer.</p>`,
 };
 type HelpId = keyof typeof HELP;
-const helpBtn = (id: HelpId, what: string) => `<button type="button" class="qhelp" data-help="${id}" aria-expanded="false" aria-label="About ${what}">?</button>`;
-const helpBox = (id: HelpId) => `<div class="helpbox" data-helpbox="${id}" hidden>${HELP[id]}</div>`;
+const helpBtn = (id: string, what: string) => `<button type="button" class="qhelp" data-help="${id}" aria-expanded="false" aria-label="About ${what.replace(/<[^>]*>/g, '')}">?</button>`;
+const helpBox = (id: string, html = HELP[id as HelpId]) => `<div class="helpbox" data-helpbox="${id}" hidden>${html}</div>`;
+/** A labelled control; its description stays behind a (?) so the screen stays clean. */
+const row2 = (title: string, control: string, id: string, help?: string, forId?: string) =>
+  `<label class="row2"${forId ? ` for="${forId}"` : ''}><span class="rt">${title}${help ? helpBtn(id, title) : ''}</span>${control}</label>${help ? helpBox(id, `<p>${help}</p>`) : ''}`;
 /** A heading with a (?) that opens the longer explanation right under it. */
 const helpH = (tag: 'h2' | 'h3', title: string, id: HelpId) => `<${tag} class="hh">${title}${helpBtn(id, title)}</${tag}>${helpBox(id)}`;
 const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
@@ -712,36 +718,137 @@ document.addEventListener('click', (e) => {
   b.setAttribute('aria-expanded', String(open));
 });
 
+// ---------- Fluid toggles ----------
+// Segmented controls (2 or 3 ways, Scroll | Redact, result tabs) get one sliding highlight, and every
+// toggle can be dragged: the thumb follows the finger and snaps to the nearest option when let go.
+const SEGS = '.segctl, .subtabs, #mode-seg';
+const segOn = (b: Element) => b.getAttribute('aria-pressed') === 'true' || b.getAttribute('aria-selected') === 'true';
+const segButtons = (g: HTMLElement) => [...g.children].filter((c): c is HTMLButtonElement => c instanceof HTMLButtonElement);
+function syncSeg(g: HTMLElement) {
+  if (g.classList.contains('seg-drag')) return;
+  const b = segButtons(g).find(segOn);
+  g.style.setProperty('--seg-o', b && b.offsetWidth ? '1' : '0');
+  if (!b || !b.offsetWidth) return;
+  g.style.setProperty('--seg-x', `${b.offsetLeft}px`);
+  g.style.setProperty('--seg-w', `${b.offsetWidth}px`);
+  if (!g.classList.contains('seg-ready')) requestAnimationFrame(() => g.classList.add('seg-ready')); // no slide on first paint
+}
+const segSize = new ResizeObserver((es) => es.forEach((e) => syncSeg(e.target as HTMLElement)));
+const segSeen = new WeakSet<HTMLElement>();
+function scanSegs(root: ParentNode = document) {
+  root.querySelectorAll<HTMLElement>(SEGS).forEach((g) => {
+    if (!segSeen.has(g)) { segSeen.add(g); g.classList.add('fluid'); segSize.observe(g); }
+    syncSeg(g);
+  });
+}
+new MutationObserver((ms) => {
+  for (const m of ms) {
+    if (m.type === 'attributes') { const g = (m.target as HTMLElement).parentElement?.closest<HTMLElement>(SEGS); if (g) syncSeg(g); }
+    else m.addedNodes.forEach((n) => { if (n instanceof HTMLElement) { const g = n.closest<HTMLElement>(SEGS); if (g) scanSegs(g.parentElement ?? g); else scanSegs(n); } });
+  }
+}).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-pressed', 'aria-selected', 'hidden'] });
+scanSegs();
+
+let dragClickBlock = false;
+// A drag ends with a click on whatever is under the finger: swallow that one click, the drag already chose.
+document.addEventListener('click', (e) => { if (dragClickBlock) { e.stopPropagation(); e.preventDefault(); } }, true);
+const blockNextClick = () => { dragClickBlock = true; setTimeout(() => { dragClickBlock = false; }, 0); };
+{
+  let g: HTMLElement | null = null, sw: HTMLInputElement | null = null, x0 = 0, base = 0, moved = false, pid = 0;
+  document.addEventListener('pointerdown', (e) => {
+    const t = e.target as HTMLElement;
+    sw = t.closest<HTMLInputElement>('input.switch');
+    g = sw ? null : t.closest<HTMLElement>(SEGS);
+    if (g && !segButtons(g).some(segOn)) g = null;
+    if (!g && !sw) return;
+    x0 = e.clientX; moved = false; pid = e.pointerId;
+    base = sw ? (sw.checked ? 18 : 0) : parseFloat(g!.style.getPropertyValue('--seg-x')) || 0;
+  }, true);
+  document.addEventListener('pointermove', (e) => {
+    if ((!g && !sw) || e.pointerId !== pid) return;
+    const dx = e.clientX - x0;
+    if (!moved && Math.abs(dx) < 6) return;
+    if (!moved) { moved = true; (sw ?? g!).classList.add('seg-drag'); try { (sw ?? g!).setPointerCapture(pid); } catch { /* gone */ } }
+    if (sw) { sw.style.setProperty('--sx', `${Math.min(18, Math.max(0, base + dx))}px`); return; }
+    const bs = segButtons(g!), first = bs[0], last = bs[bs.length - 1];
+    const w = parseFloat(g!.style.getPropertyValue('--seg-w')) || first.offsetWidth;
+    const x = Math.min(last.offsetLeft + last.offsetWidth - w, Math.max(first.offsetLeft, base + dx));
+    g!.style.setProperty('--seg-x', `${x}px`);
+    // The option under the highlight's middle takes its width as it passes.
+    const mid = x + w / 2, near = bs.find((b) => mid >= b.offsetLeft && mid <= b.offsetLeft + b.offsetWidth) ?? first;
+    g!.style.setProperty('--seg-w', `${near.offsetWidth}px`);
+  });
+  const end = (e: PointerEvent) => {
+    if ((!g && !sw) || e.pointerId !== pid) return;
+    const el = sw ?? g!;
+    const was = moved; const s2 = sw, g2 = g;
+    g = sw = null;
+    el.classList.remove('seg-drag');
+    if (!was) return;
+    blockNextClick();
+    if (e.type === 'pointercancel' && !s2) { syncSeg(g2!); return; }
+    if (s2) {
+      const on = (parseFloat(s2.style.getPropertyValue('--sx')) || 0) >= 9;
+      s2.style.removeProperty('--sx');
+      if (on !== s2.checked) { s2.checked = on; s2.dispatchEvent(new Event('change', { bubbles: true })); }
+      return;
+    }
+    const x = (parseFloat(g2!.style.getPropertyValue('--seg-x')) || 0) + (parseFloat(g2!.style.getPropertyValue('--seg-w')) || 0) / 2;
+    const bs = segButtons(g2!);
+    const pick = bs.reduce((a, b) => (Math.abs(b.offsetLeft + b.offsetWidth / 2 - x) < Math.abs(a.offsetLeft + a.offsetWidth / 2 - x) ? b : a));
+    if (!pick.disabled && !segOn(pick)) { dragClickBlock = false; pick.click(); blockNextClick(); }
+    syncSeg(g2!);
+  };
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
+}
+
 function settingsDialog() {
   if (S.busy) return;
   const seg = (v: ThemePref, l: string) => `<button data-theme-opt="${v}" aria-pressed="${prefs.theme === v}">${l}</button>`;
+  const optItems = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android')
+    .map((k) => `<div class="sitem">${optRows([k])}</div>`).join('');
   modal(`<h2>Settings</h2>
-    <h3>Appearance</h3>
-    <div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div>
-    ${helpH('h3', 'Export defaults', 'export')}
-    <p class="hint">What Export starts with. You can still change it each time.</p>
-    ${exportChoiceHtml(prefs.export)}
-    ${helpH('h3', 'Auto Detect', 'detect')}
-    <p class="hint">What Auto Detect looks for and what happens after you redact.</p>
-    <label class="row2" for="s-aw"><span>Always redact<small class="hint">Names, places or other words to always find, in any case and across line breaks. Kept on this device only.</small></span></label>
+    <div class="ssearch"><input id="s-search" type="search" placeholder="Search settings" autocomplete="off" spellcheck="false" enterkeyhint="search" aria-label="Search settings"></div>
+    <p class="hint" id="s-none" hidden>No settings match.</p>
+    <section class="sset"><h3>Appearance</h3>
+    <div class="sitem" data-k="theme dark light mode night colour color"><div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div></div></section>
+    <section class="sset">${helpH('h3', 'Export defaults', 'defaults')}
+    <div class="sitem" data-k="save method">${exportChoiceHtml(prefs.export)}</div></section>
+    <section class="sset">${helpH('h3', 'Auto Detect', 'detect')}
+    <div class="sitem" data-k="words names list">${row2('Always redact', '', 'always', 'Names, places or other words Auto Detect should always find, in any case and across line breaks. Kept on this device only.', 's-aw')}
     <form class="prow" id="s-aw-form"><input id="s-aw" placeholder="Word or phrase, e.g. Tan Ah Kow" autocomplete="off" spellcheck="false" maxlength="200" enterkeyhint="done">
       <button class="primary">Add</button></form>
-    <div class="tchips" id="s-aw-list"></div>
-    ${optRows(['platesLabelled', 'closeAfterRedact'])}
-    ${helpH('h3', 'Reading scans (OCR)', 'ocr')}
-    <p class="hint">Which languages Umbra reads on scanned pages.</p>
-    ${OCR_LANGS.map((l) => `<label class="row2"><span>${l.label}<small class="hint">${l.hint}</small></span>
-      <input class="switch" type="checkbox" data-lang="${l.id}" ${prefs.ocrLangs.includes(l.id) ? 'checked' : ''}></label>`).join('')}
-    <p class="hint" id="s-lang-hint" hidden>Keep at least one language on.</p>
-    <h3>Safety</h3>
-    <p class="hint">Reminders and privacy protections.</p>
-    ${optRows(['confirmLeave', 'reviewReminder', 'hideRecents'])}
-    <h3>Advanced</h3>
-    <label class="row2"><span>Show technical check report<small class="hint">For IT and troubleshooting. The safety check always runs either way.</small></span>
-      <input id="s-adv" class="switch" type="checkbox" ${prefs.advanced ? 'checked' : ''}></label>
-    <h3>About</h3>
-    <p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p>
+    <div class="tchips" id="s-aw-list"></div></div>
+    ${optItems(['platesLabelled', 'closeAfterRedact'])}</section>
+    <section class="sset">${helpH('h3', 'Reading scans (OCR)', 'ocr')}
+    ${OCR_LANGS.map((l) => `<div class="sitem" data-k="language ${l.id === 'zh' ? 'chinese' : 'malay'}">${row2(l.label, `<input class="switch" type="checkbox" data-lang="${l.id}" ${prefs.ocrLangs.includes(l.id) ? 'checked' : ''}>`, `lang-${l.id}`, l.hint)}</div>`).join('')}
+    <p class="hint" id="s-lang-hint" hidden>Keep at least one language on.</p></section>
+    <section class="sset"><h3>Safety</h3>
+    ${optItems(['confirmLeave', 'reviewReminder', 'hideRecents'])}</section>
+    <section class="sset"><h3>Advanced</h3>
+    <div class="sitem" data-k="debug">${row2('Show technical check report', `<input id="s-adv" class="switch" type="checkbox" ${prefs.advanced ? 'checked' : ''}>`, 'adv', 'For IT and troubleshooting. The safety check always runs either way.')}</div></section>
+    <section class="sset"><h3>About</h3>
+    <div class="sitem" data-k="version licence privacy"><p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p></div></section>
     <div class="row"><button id="s-close" class="primary">Done</button></div>`, true);
+  // Search: only matching settings stay; a section title match keeps its whole section.
+  const sq = $<HTMLInputElement>('#s-search');
+  sq.oninput = () => {
+    const words = sq.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const hit = (t: string) => words.every((w) => t.includes(w));
+    let any = false;
+    $('#sheet').querySelectorAll<HTMLElement>('.sset').forEach((sec) => {
+      const title = sec.querySelector('h3')?.textContent?.toLowerCase() ?? '';
+      const all = !words.length || hit(title);
+      let n = 0;
+      sec.querySelectorAll<HTMLElement>('.sitem').forEach((it) => {
+        const on = all || hit(`${title} ${it.textContent} ${it.dataset.k ?? ''}`.toLowerCase());
+        slide(it, on); if (on) n++;
+      });
+      slide(sec, n > 0); any ||= n > 0;
+    });
+    slide($('#s-none'), !any);
+  };
   bindExportChoice(prefs.export, () => savePrefs());
   $('#sheet').querySelectorAll<HTMLButtonElement>('[data-theme-opt]').forEach((b) => {
     b.onclick = () => {
@@ -809,21 +916,42 @@ function updateSheetSpace() {
     return;
   }
   stage.style.setProperty('--side-l', '0px'); stage.style.setProperty('--side-r', '0px');
-  const h = p.hidden || p.classList.contains('closing') ? 0
-    : p.classList.contains('peek') ? parseFloat(getComputedStyle(p).getPropertyValue('--peek-h')) || 64
-    : p.offsetHeight;
+  const h = p.hidden || p.classList.contains('closing') ? 0 : p.offsetHeight;
   stage.style.setProperty('--sheet-h', `${Math.round(h)}px`);
 }
-new ResizeObserver(updateSheetSpace).observe($('#panel'));
-sideMode.addEventListener('change', () => { $('#panel').classList.remove('peek'); updateSheetSpace(); });
+new ResizeObserver(() => { if (!sheetDrag) updateSheetSpace(); }).observe($('#panel'));
+sideMode.addEventListener('change', () => setSnap(snap));
+new ResizeObserver(() => { if (!$('#panel').hidden) setSnap(snap); }).observe(stage);
+
+// Bottom sheet stops: just the header, 40% of the screen, or covering the whole document.
+type Snap = 'peek' | 'half' | 'full';
+let snap: Snap = 'half';
+let sheetDrag = false;
+function snapHeights(): Record<Snap, number> {
+  const H = stage.clientHeight;
+  const head = $('#panel').querySelector<HTMLElement>('.phead')?.offsetHeight ?? 64;
+  return { peek: head, half: Math.max(head, Math.round(H * 0.4)), full: H };
+}
+function setSnap(to: Snap) {
+  const p = $('#panel');
+  snap = to;
+  p.dataset.snap = to;
+  if (sideMode.matches) { p.style.height = ''; updateSheetSpace(); return; }
+  p.style.height = `${snapHeights()[to]}px`;
+  updateSheetSpace();
+}
 
 function showPanel(html: string) {
   const p = $('#panel');
   const wasOpen = !p.hidden && !p.classList.contains('closing');
   clearTimeout(panelCloseTimer);
-  p.classList.remove('peek', 'closing');
-  p.innerHTML = `<button class="grab" id="p-grab" aria-label="Collapse or expand panel"><i></i></button>${html}`;
-  p.scrollTop = 0;
+  p.classList.remove('closing');
+  p.innerHTML = `<div class="phead"><button class="grab" id="p-grab" aria-label="Collapse or expand panel"><i></i></button></div><div class="pbody">${html}</div>`;
+  // The title bar sits above the scrolling list, so nothing scrolls past it.
+  const ph = p.querySelector<HTMLElement>('.pbody > .ph');
+  if (ph) p.querySelector('.phead')!.append(ph);
+  if (!wasOpen) snap = 'half';
+  setSnap(snap);
   if (wasOpen) {
     // Switching Find <-> Auto Detect: cross-fade the content, the sheet stays put.
     p.animate?.([{ opacity: 0.2 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' });
@@ -837,33 +965,54 @@ function showPanel(html: string) {
   updateSheetSpace();
 }
 
-/** Tap the handle (or the title) to collapse the panel to its header; drag down/up does the same. */
+/**
+ * Bottom sheet: drag the handle or title bar and it follows the finger, then settles on the nearest stop
+ * (a quick flick carries it on). Tapping the handle or title collapses it, or brings it back to 40%.
+ * Landscape: the handle is the inner edge, dragged to resize.
+ */
 function bindGrab(p: HTMLElement) {
-  const toggle = (force?: boolean) => {
-    const ph = p.querySelector<HTMLElement>('.ph');
-    p.scrollTop = 0;
-    if (ph) p.style.setProperty('--peek-h', `${Math.ceil(ph.getBoundingClientRect().bottom - p.getBoundingClientRect().top) + 4}px`);
-    p.classList.toggle('peek', force);
-    updateSheetSpace();
+  const head = p.querySelector<HTMLElement>('.phead')!;
+  let y0: number | null = null, h0 = 0, moved = false, fromTitle = false, last: [number, number][] = [];
+  head.onpointerdown = (e) => {
+    const t = e.target as HTMLElement;
+    fromTitle = !!t.closest('.ph b, .grab');
+    if (t.closest('button:not(.grab), input, a')) return; // its own buttons still work
+    if (sideMode.matches && !t.closest('.grab')) return;
+    y0 = e.clientY; h0 = p.offsetHeight; moved = false; last = [[e.clientY, e.timeStamp]];
+    head.setPointerCapture(e.pointerId);
   };
-  const grab = $('#p-grab');
-  let y0: number | null = null;
-  grab.onpointerdown = (e) => { y0 = e.clientY; grab.setPointerCapture(e.pointerId); };
-  grab.onpointermove = (e) => {
-    if (y0 === null || !sideMode.matches) return;
-    // Side panel: drag the inner edge to resize (20–45% of the screen).
-    const sb = stage.getBoundingClientRect();
-    const px = prefs.ui.panelSide === 'right' ? sb.right - e.clientX : e.clientX - sb.left;
-    prefs.ui.panelW = clampPanelW((px / sb.width) * 100);
-    applyPanelUi(); updateSheetSpace();
-  };
-  grab.onpointerup = (e) => {
+  head.onpointermove = (e) => {
     if (y0 === null) return;
-    const dy = e.clientY - y0; y0 = null;
-    if (sideMode.matches) { savePrefs(); updateSheetSpace(); return; }
-    if (Math.abs(dy) < 8) toggle(); else toggle(dy > 0);
+    if (sideMode.matches) {
+      // Side panel: drag the inner edge to resize (20–45% of the screen).
+      const sb = stage.getBoundingClientRect();
+      const px = prefs.ui.panelSide === 'right' ? sb.right - e.clientX : e.clientX - sb.left;
+      prefs.ui.panelW = clampPanelW((px / sb.width) * 100);
+      applyPanelUi(); updateSheetSpace();
+      return;
+    }
+    if (!moved && Math.abs(e.clientY - y0) < 6) return;
+    if (!moved) { moved = true; sheetDrag = true; p.classList.add('dragging'); }
+    const { peek, full } = snapHeights();
+    p.style.height = `${Math.min(full, Math.max(peek, h0 - (e.clientY - y0)))}px`;
+    last.push([e.clientY, e.timeStamp]); if (last.length > 5) last.shift();
   };
-  p.querySelector<HTMLElement>('.ph b')?.addEventListener('click', () => { if (!sideMode.matches) toggle(); });
+  const end = (e: PointerEvent) => {
+    if (y0 === null) return;
+    y0 = null;
+    if (sideMode.matches) { savePrefs(); updateSheetSpace(); return; }
+    p.classList.remove('dragging'); sheetDrag = false;
+    if (!moved) { if (fromTitle && e.type === 'pointerup') setSnap(snap === 'peek' ? 'half' : 'peek'); return; }
+    // Where a flick would carry it in ~0.2 s, then the nearest stop.
+    const [ya, ta] = last[0], [yb, tb] = last[last.length - 1];
+    const v = tb > ta ? (yb - ya) / (tb - ta) : 0; // px per ms, + = down
+    const aim = p.offsetHeight - v * 200;
+    const hs = snapHeights();
+    const best = (Object.keys(hs) as Snap[]).reduce((a, b) => (Math.abs(hs[b] - aim) < Math.abs(hs[a] - aim) ? b : a));
+    setSnap(best);
+  };
+  head.onpointerup = end;
+  head.onpointercancel = end;
   // Landscape: move the panel to the other side.
   const close = p.querySelector<HTMLElement>('.ph .pc');
   if (close && !p.querySelector('.side-swap')) {
@@ -882,10 +1031,9 @@ function closePanel(animate: boolean | 'replace' = false) {
   clearTimeout(panelCloseTimer);
   if (animate === 'replace') { /* content is swapped by showPanel */ }
   else if (animate && !p.hidden) {
-    p.classList.remove('peek');
     p.classList.add('closing');
     panelCloseTimer = window.setTimeout(() => { p.hidden = true; p.innerHTML = ''; p.classList.remove('closing'); updateSheetSpace(); }, 260);
-  } else { p.classList.remove('closing', 'peek'); p.hidden = true; p.innerHTML = ''; }
+  } else { p.classList.remove('closing'); p.hidden = true; p.innerHTML = ''; }
   updateSheetSpace();
   S.panel = null;
   setSugg([]);
@@ -954,6 +1102,7 @@ function applySugg(list: Sugg[]) {
 function reveal(sg: Sugg) {
   const el = viewer.querySelector<HTMLElement>(`.page[data-i="${sg.page}"]`);
   if (!el) return;
+  if (snap === 'full' && !sideMode.matches) setSnap('half'); // the document has to be visible to show the item
   const r = sg.rects[0];
   const vb = viewer.getBoundingClientRect(), eb = el.getBoundingClientRect();
   viewer.scrollTo({
@@ -1244,7 +1393,6 @@ function openFind() {
       <button class="primary" data-busy>Find</button></form>
     <div class="chips"><button class="chip" id="f-case" aria-pressed="false">Match case</button><button class="chip" id="f-word" aria-pressed="false">Whole word</button></div>
     <div class="tchips" id="f-terms"></div>
-    <p class="hint intro">Each search stays as a filter above. Tap × to remove it. Scanned pages are read with on-device OCR first.</p>
     <div id="p-status" class="hint" role="status"></div><div id="p-results"></div>`);
   $('#p-close').onclick = () => closePanel(true);
   for (const id of ['#f-case', '#f-word']) {
@@ -1278,9 +1426,8 @@ function openDetect() {
   const dp = prefs.detect;
   showPanel(`<div class="ph"><b>Auto Detect</b>${helpBtn('detect', 'Auto Detect')}<button class="pc" id="p-close" aria-label="Close">×</button></div>${helpBox('detect')}
     <div class="prow"><button id="d-go" class="primary" data-busy>Scan document</button></div>
-    <p class="hint intro">Finds IC numbers, phones, emails, accounts, addresses and labelled names. Nothing is redacted until you confirm. Use Find for anything it misses.${dp.always.length ? ` Also finds your ${dp.always.length} “Always redact” word${dp.always.length === 1 ? '' : 's'} from Settings.` : ' Names or places to always redact can be added in Settings on the home screen.'}</p>
     <div id="p-status" class="hint" role="status"></div><div id="p-results"></div>
-    <details id="d-cfg"><summary>Choose what to find <small class="hint">· types and your own patterns</small></summary>
+    <details id="d-cfg"><summary>Choose what to find</summary>
       <div class="grid" id="d-grid"></div>
       <div id="d-form" class="cform" hidden>
         <div class="prow"><input id="d-label" placeholder="Name, e.g. Staff ID" autocomplete="off"></div>
@@ -1400,7 +1547,6 @@ function exportChoiceHtml(e: ExportPrefs): string {
   return `<div class="segctl" id="x-method">
       <button data-m="vector" aria-pressed="${e.method === 'vector'}">Keep original text</button>
       <button data-m="image" aria-pressed="${e.method === 'image'}">Image only</button></div>
-    <p class="hint" id="x-desc"></p>
     <div id="x-image-opts">
     ${helpH('h3', 'Image settings', 'image')}
     <label class="row2"><span>Quality</span><select id="x-dpi">
@@ -1411,20 +1557,14 @@ function exportChoiceHtml(e: ExportPrefs): string {
       ${([['auto', 'Auto (smallest file)'], ['png', 'Sharp (lossless, larger)'], ['jpeg', 'Photo (JPEG)']] as const).map(([v, l]) =>
         `<option value="${v}"${e.compression === v ? ' selected' : ''}>${l}</option>`).join('')}
     </select></label>
-    <label class="row2"><span>Searchable text (OCR)
-      <small class="hint">Lets you copy and search the visible words. Blacked-out parts are never included.</small></span>
+    <label class="row2"><span>Searchable text (OCR)</span>
       <input id="x-search" class="switch" type="checkbox" ${e.searchable ? 'checked' : ''}></label>
     </div>`;
 }
 
 /** Wire exportChoiceHtml: every change is written into `e`, then `changed` runs. */
 function bindExportChoice(e: ExportPrefs, changed: () => void) {
-  const DESC = {
-    vector: 'Recommended. Removes what\'s under your boxes and keeps the rest as real text. Looks like the original, small and searchable.',
-    image: 'Strongest. Every page becomes a picture with nothing else kept. Bigger files.',
-  };
   const show = (instant = false) => {
-    $('#x-desc').textContent = DESC[e.method];
     slide($('#x-image-opts'), e.method === 'image', instant);
     $('#x-method').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === e.method)));
   };
@@ -1443,11 +1583,11 @@ function exportDialog() {
   const total = S.boxes.reduce((n, b) => n + b.length, 0);
   const pending = S.sugg.filter((x) => x.on).length;
   const ex: ExportPrefs = { ...(docExport ?? prefs.export) };
-  modal(`${helpH('h2', 'Save a redacted copy', 'export')}
+  modal(`<h2>Save a redacted copy</h2>
     ${total ? '' : '<p class="note">Nothing is redacted. That\'s fine: you\'ll still get a cleaned copy, searchable too if OCR is on.</p>'}
     ${pending ? `<p class="fail">${pending} found item(s) aren't redacted yet. Tap "Redact" in the panel first.</p>` : ''}
     ${prefs.opts.reviewReminder && total ? '<p class="note">Before exporting, scroll through every page. Auto Detect and Find can miss unusual formats.</p>' : ''}
-    <h3>How to remove content</h3>
+    ${helpH('h3', 'How to remove content', 'export')}
     ${exportChoiceHtml(ex)}
     ${helpH('h3', 'Split into files', 'split')}
     ${splitOptionsHtml(S.sizes.length)}
@@ -1585,22 +1725,17 @@ function splitOptionsHtml(n: number): string {
   return `<div class="segctl" id="sp-mode">
       <button data-m="none">One file</button><button data-m="every">Every N</button><button data-m="ranges">Ranges</button><button data-m="half">Halves</button></div>
     <div class="spbox" id="sp-every">
-      <label class="row2"><span>Pages in each file<small class="hint">1 gives one file per page.</small></span>
+      <label class="row2"><span>Pages in each file</span>
         <input id="sp-n" type="number" min="1" max="${n}" value="${Math.min(L.every, n)}" inputmode="numeric" style="width:6em"></label>
     </div>
     <div class="spbox" id="sp-ranges">
-      <label class="row2 stack" for="sp-r"><span>Page ranges<small class="hint">One file per range, for example <b>1-3, 4, 8-</b> (8- means 8 to the end). Pages not listed are left out.</small></span></label>
-      <input id="sp-r" placeholder="1-3, 4, 8-" autocomplete="off" spellcheck="false" inputmode="text" enterkeyhint="done" value="${esc(L.ranges)}" style="width:100%">
+      <label class="row2" for="sp-r"><span>Page ranges</span></label>
+      <input id="sp-r" placeholder="e.g. 1-3, 4, 8-" autocomplete="off" spellcheck="false" inputmode="text" enterkeyhint="done" value="${esc(L.ranges)}" style="width:100%">
     </div>
     <div class="spbox" id="sp-half">
-      <p class="hint">For scans with two pages side by side. You get one PDF with every page cut in two.</p>
       <div class="segctl" id="sp-cut"><button data-c="lr">Left | Right</button><button data-c="tb">Top / Bottom</button></div>
-      <label class="row2"><span><span id="sp-wide-t">Only cut pages that are wider than tall</span>
-        <small class="hint">A cover or single page in the scan stays whole.</small></span>
-        <input id="sp-wide" class="switch" type="checkbox" ${L.widerOnly ? 'checked' : ''}></label>
-      <label class="row2" id="sp-rtl-row"><span>Right page first
-        <small class="hint">For books read right to left.</small></span>
-        <input id="sp-rtl" class="switch" type="checkbox" ${L.rtl ? 'checked' : ''}></label>
+      ${row2('<span id="sp-wide-t">Only cut pages that are wider than tall</span>', `<input id="sp-wide" class="switch" type="checkbox" ${L.widerOnly ? 'checked' : ''}>`, 'sp-wide', 'A cover or single page in the scan stays whole.')}
+      <div id="sp-rtl-row">${row2('Right page first', `<input id="sp-rtl" class="switch" type="checkbox" ${L.rtl ? 'checked' : ''}>`, 'sp-rtl', 'For books read right to left.')}</div>
     </div>
     <p class="note" id="sp-plan"></p>`;
 }
@@ -1692,23 +1827,6 @@ $('#btn-close').onclick = () => { if (S.busy) return; if (S.panel) closePanel();
 $('#btn-open-2').onclick = pickAndLoad;
 $('#mode-draw').onclick = () => { S.mode = 'draw'; syncToolbar(); };
 $('#mode-pan').onclick = () => { S.mode = 'pan'; syncToolbar(); };
-// A horizontal swipe on the mode toggle switches mode (right: Redact, left: Scroll).
-{
-  let x0: number | null = null;
-  const seg = $('#mode-seg');
-  seg.addEventListener('pointerdown', (e) => { x0 = e.clientX; });
-  seg.addEventListener('pointerup', (e) => {
-    if (x0 === null) return;
-    const dx = e.clientX - x0; x0 = null;
-    if (Math.abs(dx) < 24) return;
-    const m = dx > 0 ? 'draw' : 'pan';
-    if (m !== S.mode) { S.mode = m; syncToolbar(); }
-    seg.dataset.swiped = '1'; // the click that follows the swipe mustn't switch it back
-    setTimeout(() => delete seg.dataset.swiped, 0);
-  });
-  seg.addEventListener('pointercancel', () => { x0 = null; });
-  seg.addEventListener('click', (e) => { if (seg.dataset.swiped) e.stopPropagation(); }, true);
-}
 $('#btn-undo').onclick = undo;
 $('#btn-redo').onclick = redo;
 $('#btn-reset').onclick = resetAll;

@@ -56,6 +56,9 @@ button.big { padding: 13px 26px; font-size: 1.05rem; }
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: .06em; }
 .brand .ico { width: 26px; height: 26px; color: var(--accent); stroke-width: 1.6; }
+/* The app icon, the same everywhere: shield on a dark rounded tile */
+svg.mark { stroke: none; fill: none; display: block; }
+#empty .hero.mark { stroke: none; fill: none; margin: 0 auto 10px; border-radius: 18px; box-shadow: 0 6px 18px rgba(0, 0, 0, .18); }
 .docname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: .9rem; text-align: center; }
 .appbar .pill { background: var(--surface); }
 .appbar .round { width: 40px; padding: 0; }
@@ -129,15 +132,15 @@ body:not(.has-doc) .dock { display: none; }
 
 /* ---------- Bottom panel (Find / Detect) ---------- */
 #panel {
-  max-height: 48vh; overflow: auto; background: var(--surface); margin: 0 6px; border-top: 1px solid var(--line);
-  padding: 0 14px 10px; user-select: text;
+  max-height: 48vh; overflow: hidden; background: var(--surface); margin: 0 6px; border-top: 1px solid var(--line);
+  padding: 0; user-select: text; display: flex; flex-direction: column;
 }
+/* Title bar on top, never scrolled over; only the list below scrolls */
+#panel .phead { flex: none; background: var(--surface); padding: 0 14px; border-bottom: 1px solid var(--line); touch-action: none; user-select: none; }
+#panel .pbody { flex: 1; min-height: 0; overflow: auto; padding: 4px 14px 10px; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 @keyframes rise { from { transform: translateY(16px); opacity: 0; } }
 #panel[hidden] { display: none; }
-#panel .ph {
-  display: flex; align-items: center; justify-content: space-between; padding: 12px 0 6px;
-  position: sticky; top: 0; background: var(--surface); z-index: 1;
-}
+#panel .ph { display: flex; align-items: center; justify-content: space-between; padding: 12px 0 6px; }
 #panel .ph b { font-size: 1.02rem; }
 #panel .pc { width: 36px; min-height: 36px; padding: 0; }
 #panel .prow { display: flex; gap: 8px; margin: 8px 0; align-items: center; }
@@ -259,11 +262,12 @@ progress { width: 100%; accent-color: var(--accent); height: 8px; }
 .dock .seg .tool { padding-top: 4px; }
 
 /* Panel handle: tap/drag to collapse to the header (more room for the document on small phones) */
-#panel .grab { position: sticky; top: 0; z-index: 2; display: flex; width: 100%; min-height: 0; height: 18px; padding: 0;
-  border: 0; border-radius: 0; background: var(--surface); justify-content: center; align-items: center; cursor: grab; touch-action: none; }
+#panel .grab { display: flex; width: 100%; min-height: 0; height: 18px; padding: 0;
+  border: 0; border-radius: 0; background: transparent; justify-content: center; align-items: center; cursor: grab; touch-action: none; }
+#panel .grab:active { transform: none; }
 #panel .grab i { width: 40px; height: 4px; border-radius: 4px; background: var(--line); }
-#panel .ph { top: 18px; padding-top: 2px; }
-#panel .ph b { cursor: pointer; }
+#panel .ph { padding-top: 2px; }
+#panel .ph b { cursor: grab; }
 
 /* Sub-tabs (Auto Detect: Items / By type) */
 .subtabs { display: flex; gap: 4px; background: var(--surface-2); border-radius: 12px; padding: 3px; margin: 6px 0; }
@@ -283,12 +287,11 @@ progress { width: 100%; accent-color: var(--accent); height: 8px; }
 
 /* Short screens: keep the document visible */
 @media (max-height: 760px) {
-  #panel { max-height: 50%; }
   .appbar { padding-top: calc(var(--sat) + 4px); padding-bottom: 4px; }
   .tool { min-height: 46px; }
   #panel .hits li { padding: 5px 0; }
 }
-@media (max-height: 620px) { #panel { max-height: 46%; } #panel .hint { font-size: .8rem; } }
+@media (max-height: 620px) { #panel .hint { font-size: .8rem; } }
 /* Narrow phones */
 @media (max-width: 380px) {
   :root { font-size: 14px; }
@@ -312,15 +315,17 @@ details[open] > :not(summary) { animation: rise .22s cubic-bezier(.2, .8, .2, 1)
 
 /* ---------- Bottom sheet: overlays the document and moves only with transforms (smooth on phones) ---------- */
 #panel {
-  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; max-height: 55%;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; max-height: none; height: 40%;
   border-radius: 20px 20px 0 0; border: 1px solid var(--line); border-bottom: 0;
   box-shadow: 0 -10px 30px rgba(0, 0, 0, .22);
-  transform: translateY(0); transition: transform .34s cubic-bezier(.2, .8, .2, 1);
+  transform: translateY(0); transition: transform .34s cubic-bezier(.2, .8, .2, 1), height .32s cubic-bezier(.2, .8, .2, 1);
   will-change: transform; overscroll-behavior: contain;
 }
 #panel.enter, #panel.closing { transform: translateY(105%); }
 #panel.closing { transition: transform .24s cubic-bezier(.4, 0, 1, 1); }
-#panel.peek { transform: translateY(calc(100% - var(--peek-h, 64px))); overflow: hidden; }
+#panel.dragging { transition: none; }
+#panel[data-snap="peek"] .phead { border-bottom-color: transparent; }
+#panel[data-snap="full"] { border-radius: 0; }
 #panel .grab { border-radius: 20px 20px 0 0; }
 .zoom { bottom: calc(var(--sheet-h, 0px) + 16px); transition: bottom .34s cubic-bezier(.2, .8, .2, 1), opacity .2s, transform .2s; }
 
@@ -356,6 +361,8 @@ button.primary.danger { background: var(--danger); border-color: var(--danger); 
 
 /* Start screen: content centred, never scrolls */
 body:not(.has-doc) #viewer { overflow: hidden; padding: 0; display: grid; place-items: center; }
+/* Start screen: a card rounded on every corner, with space below it too */
+body:not(.has-doc) #viewer { bottom: calc(var(--sab) + 8px); border-radius: 18px; }
 body:not(.has-doc) #empty { margin: 0 auto; }
 @media (max-height: 520px) {
   #empty .hero { width: 52px; height: 52px; margin-bottom: 2px; }
@@ -382,7 +389,8 @@ body:not(.has-doc) #empty { margin: 0 auto; }
     box-shadow: -10px 0 30px rgba(0, 0, 0, .22); padding-left: 22px;
   }
   #panel.enter, #panel.closing { transform: translateX(105%); }
-  #panel.peek { transform: none; overflow: auto; }
+  #panel .phead, #panel .pbody { padding-left: 0; padding-right: 14px; }
+  body.panel-left #panel .phead, body.panel-left #panel .pbody { padding-right: 0; }
   body.panel-left #panel { left: 0; right: auto; border-radius: 0 18px 0 0; border-left: 0; border-right: 1px solid var(--line);
     box-shadow: 10px 0 30px rgba(0, 0, 0, .22); padding-left: 14px; padding-right: 22px; }
   body.panel-left #panel.enter, body.panel-left #panel.closing { transform: translateX(-105%); }
@@ -415,3 +423,36 @@ body:not(.has-doc) .dock { position: fixed; }
 .spbox { border: 1px solid var(--line); border-radius: 14px; padding: 2px 12px 10px; margin-top: 8px; }
 .spbox .segctl { margin-top: 8px; }
 .sheet h3 + .segctl, .sheet h3 + .helpbox + .segctl { margin-top: 6px; }
+
+/* Settings: clear breaks between sections */
+.sheet .sset { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 2px; }
+/* Settings search stays at the top while the list scrolls */
+.sheet .ssearch { position: sticky; top: -20px; z-index: 2; background: var(--surface); margin: 0 -20px; padding: 6px 20px 8px; }
+.sheet .ssearch input { width: 100%; }
+#s-none { margin-top: 12px; }
+.sheet .sset > h3:first-child { margin-top: 14px; }
+.sheet .sset > :last-child { margin-bottom: 2px; }
+/* A row's title with its (?) beside it */
+.sheet label.row2 > span.rt { flex-direction: row; align-items: center; gap: 8px; }
+.sheet label.row2 + .helpbox { margin-top: 6px; }
+
+/* Fluid toggles: one highlight slides between options and follows a drag (main.ts "Fluid toggles") */
+.fluid { position: relative; isolation: isolate; touch-action: pan-y; --seg-r: 11px; }
+.subtabs.fluid { --seg-r: 9px; }
+#mode-seg.fluid { --seg-r: 13px; }
+.fluid::before {
+  content: ""; position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 0; width: var(--seg-w, 0px);
+  transform: translateX(var(--seg-x, 0px)); opacity: var(--seg-o, 0);
+  background: var(--surface); border-radius: var(--seg-r); box-shadow: 0 1px 3px rgba(0, 0, 0, .14);
+}
+.fluid.seg-ready::before { transition: transform .32s cubic-bezier(.2, .8, .2, 1), width .32s cubic-bezier(.2, .8, .2, 1), opacity .2s; }
+.fluid.seg-drag::before { transition: width .15s ease; }
+.fluid > button, .fluid > button[aria-pressed="true"], .fluid > button[aria-selected="true"], #mode-seg.fluid > .tool.on {
+  background: transparent; box-shadow: none; transition: color .25s ease;
+}
+/* Switches: the thumb follows a drag too */
+.switch { touch-action: pan-y; }
+.switch::after { transform: translateX(var(--sx, 0px)); }
+.switch:checked::after { transform: translateX(var(--sx, 18px)); }
+.switch.seg-drag::after { transition: none; }
+@media (prefers-reduced-motion: reduce) { .fluid.seg-ready::before { transition: none; } }
