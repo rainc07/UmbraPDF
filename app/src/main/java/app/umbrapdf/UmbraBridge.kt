@@ -111,6 +111,10 @@ class UmbraBridge(private val activity: MainActivity, private val store: LocalFi
     @JavascriptInterface
     fun ocrCaps(): String = JSONObject().put("native", activity.nativeOcr).put("binary", activity.nativeOcrBinary).toString()
 
+    /** OCR text language from Settings: "en" (English) or "ch" (Chinese, Simplified + Traditional). Used from the next read. */
+    @JavascriptInterface
+    fun setOcrLang(lang: String) = activity.setOcrLang(lang)
+
     /** Long work started (scan or export): keeps running with an ongoing notification if the user leaves the app. */
     @JavascriptInterface
     fun workStart(title: String) = activity.runOnUiThread { activity.workStart(title.take(80)) }

@@ -18,6 +18,21 @@ let seq = 0;
 const pending = new Map<number, (r: PpResponse) => void>();
 const LOAD_TIMEOUT_MS = 60_000;
 
+/** Text language of the recognition model: English, or Chinese (Simplified + Traditional, and English). */
+export type OcrLang = 'en' | 'ch';
+let lang: OcrLang = 'en';
+export const getOcrLang = (): OcrLang => lang;
+/**
+ * Choose the recognition model. The next read loads it (the engines in use are let go). Android's own scan of
+ * scanned pages (NativeScan.kt) is told directly, since it reads without asking this side.
+ */
+export function setOcrLang(l: OcrLang): void {
+  (window as unknown as { UmbraAndroid?: { setOcrLang?(l: string): void } }).UmbraAndroid?.setOcrLang?.(l);
+  if (l === lang) return;
+  lang = l;
+  terminatePpocr();
+}
+
 /** Timings of the last read, for the technical report and benchmarks. */
 export const ppStats = { log: [] as string[] };
 
@@ -104,8 +119,8 @@ export function ppocrReady(): Promise<boolean> {
   if (native) {
     ready = (async () => {
       const t0 = performance.now(), id = ++seq;
-      const r = await nativeCall(JSON.stringify({ id, kind: 'warm' }), id);
-      if (r.ok) { ppStats.log.push(`native engine load: ${Math.round(performance.now() - t0)} ms (${r.threads ? `${r.threads} threads` : 'GPU'})`); return true; }
+      const r = await nativeCall(JSON.stringify({ id, kind: 'warm', lang }), id);
+      if (r.ok) { ppStats.log.push(`native engine load (${lang}): ${Math.round(performance.now() - t0)} ms (${r.threads ? `${r.threads} threads` : 'GPU'})`); return true; }
       console.warn('[umbra] native OCR failed to load', r.error);
       native = null; nativeOff = true; ready = null;
       return ppocrReady();
@@ -117,14 +132,14 @@ export function ppocrReady(): Promise<boolean> {
     const timeout = () => new Promise<PpResponse>((res) => setTimeout(() => res({ id: 0, ok: false, error: 'timeout' }), LOAD_TIMEOUT_MS));
     try {
       const first = spawn();
-      const r = await Promise.race([call(first, { kind: 'init', base: vendorUrl(''), det: true }), timeout()]);
+      const r = await Promise.race([call(first, { kind: 'init', base: vendorUrl(''), det: true, lang }), timeout()]);
       if (!r.ok) throw new Error(r.error);
       engines = [first];
-      ppStats.log.push(`engine load: ${Math.round(performance.now() - t0)} ms`);
+      ppStats.log.push(`engine load (${lang}): ${Math.round(performance.now() - t0)} ms`);
       // Extra recognition engines load in the background; each joins the pool when ready.
       for (let i = 1; i < POOL; i++) {
         const e = spawn();
-        void call(e, { kind: 'init', base: vendorUrl(''), det: false }).then((x) => { if (x.ok) engines.push(e); else e.w.terminate(); });
+        void call(e, { kind: 'init', base: vendorUrl(''), det: false, lang }).then((x) => { if (x.ok) engines.push(e); else e.w.terminate(); });
       }
       return true;
     } catch (e) {

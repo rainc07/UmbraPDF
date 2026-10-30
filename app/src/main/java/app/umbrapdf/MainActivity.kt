@@ -100,6 +100,9 @@ class MainActivity : ComponentActivity() {
     @Volatile var nativeOcrBinary = false
         private set
 
+    /** Recognition language for the next read ("en" or "ch"), from Settings. */
+    fun setOcrLang(lang: String) { if (::ocr.isInitialized) ocr.lang = lang }
+
     private fun installOcr() = try { installOcrUnsafe() } catch (e: Throwable) {
         android.util.Log.e("umbra", "native OCR unavailable", e) // the web core falls back to Tesseract
         nativeOcr = false
@@ -125,7 +128,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Binary request: little-endian int32 header [id, width, height, detLimit] + RGBA pixels.
-     * String request: {"id", "kind":"warm"} to load the models, or {"id","w","h","limit","b64"} (no ArrayBuffer support).
+     * String request: {"id", "kind":"warm", "lang"} to load the models (lang "en" or "ch", optional), or {"id","w","h","limit","b64"} (no ArrayBuffer support).
      */
     private fun ocrRequest(bin: ByteArray?, str: String?): String {
         var id = 0
@@ -140,6 +143,7 @@ class MainActivity : ComponentActivity() {
                 val j = JSONObject(str ?: "{}")
                 id = j.optInt("id")
                 if (j.optString("kind") == "warm") {
+                    if (j.has("lang")) ocr.lang = j.optString("lang")
                     val ms = ocr.ensureLoaded()
                     JSONObject().put("id", id).put("ok", true).put("load", ms).put("threads", ocr.threads).toString()
                 } else {
