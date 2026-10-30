@@ -1467,6 +1467,7 @@ function exportDialog() {
     S.busy = true; syncToolbar();
     const w = startWork('Preparing your redacted copy');
     try {
+      await painted(); // the redaction engine blocks this thread, so show the progress page before it starts
       const xo: ExportOptions = { ...opts, searchable: method === 'image' && opts.searchable };
       // Exported already with these boxes and settings (e.g. once whole, now split): reuse that checked copy.
       const done = S.verified?.key === exportKey(xo, method) ? S.verified.out : null;
@@ -1494,6 +1495,17 @@ function exportDialog() {
       S.busy = false; syncToolbar();
     }
   };
+}
+
+/**
+ * Resolves once the page has drawn what was just put on screen: after the next frame, or after 150 ms if no
+ * frame comes (a still screen on Android can stop sending frames), so work that follows never waits on one.
+ */
+function painted(): Promise<void> {
+  return new Promise((r) => {
+    const t = setTimeout(r, 150);
+    requestAnimationFrame(() => setTimeout(() => { clearTimeout(t); r(); }, 0));
+  });
 }
 
 /** Export threw (nothing was saved): say why, and what to do. */

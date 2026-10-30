@@ -4,6 +4,7 @@
 import {
   PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, PDFRef, PDFStream, decodePDFRawStream,
 } from 'pdf-lib';
+import { nextTask } from './pdf';
 import type { Progress, RedactionMap } from './types';
 
 type MuPdf = typeof import('mupdf');
@@ -91,8 +92,11 @@ export async function exportVector(
     doc.bake(true, true);
     const n = doc.countPages();
     const hiddenPages: number[] = [];
+    let lastYield = 0;
     for (let i = 0; i < n; i++) {
       onProgress(`Redacting page ${i + 1}/${n}`, (i / n) * 0.8);
+      // MuPDF runs on this thread: let the page draw the progress (and stay responsive) every ~50 ms.
+      if (performance.now() - lastYield > 50) { await nextTask(); lastYield = performance.now(); }
       const page = doc.loadPage(i) as import('mupdf').PDFPage;
       const rects = redactions[i] ?? [];
       for (const r of rects) {
@@ -122,6 +126,7 @@ export async function exportVector(
     for (const k of CATALOG_STRIP) root.delete(k);
     trailer.delete('Info');
     onProgress('Rebuilding file', 0.85);
+    await nextTask();
     // Full rewrite (never incremental: old revisions would keep the original), dropping unused objects.
     const buf = doc.saveToBuffer('garbage=4,compress=yes,clean=yes');
     saved = buf.asUint8Array().slice();
