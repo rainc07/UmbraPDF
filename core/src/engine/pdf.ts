@@ -55,7 +55,7 @@ export async function pageSizes(doc: PDFDocumentProxy): Promise<PageSize[]> {
 }
 
 /** Yield to the event loop without waiting for a frame (a MessageChannel task isn't throttled like timers). */
-function nextTask(): Promise<void> {
+export function nextTask(): Promise<void> {
   return new Promise((r) => { const ch = new MessageChannel(); ch.port1.onmessage = () => { ch.port1.close(); r(); }; ch.port2.postMessage(0); });
 }
 

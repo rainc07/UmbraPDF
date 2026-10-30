@@ -350,6 +350,28 @@ check(imgHidden && xp.method === 'image' && xp.dpi === 150, `export defaults: sa
   await T('reset');
 }
 
+// Keep original text: the progress page shows straight after Continue, not once the redaction engine is done.
+{
+  const d5 = await PDFDocument.create(); const f5 = await d5.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < 60; i++) { const p = d5.addPage([612, 792]); for (let y = 750; y > 50; y -= 14) p.drawText(`Page ${i + 1} line ${y} SECRET 12345 sample text`, { x: 40, y, size: 10, font: f5 }); }
+  await page.evaluate(async (a) => {
+    const T = window.__umbraTest; await T.load(new Uint8Array(a));
+    T.setBoxes(T.sizes().map(() => Array.from({ length: 20 }, (_, k) => ({ x: 40, y: 40 + k * 35, w: 300, h: 10 }))));
+  }, Array.from(await d5.save()));
+  await page.click('#btn-export'); await page.waitForTimeout(250);
+  await page.click('#x-method [data-m="vector"]');
+  await page.waitForTimeout(3000); // redaction engine loaded while the dialog is open, as on a phone
+  const fr = await page.evaluate(() => new Promise((done) => {
+    const t0 = performance.now(); let first = null;
+    const loop = () => { if (first === null && document.querySelector('#x-bar')) first = performance.now() - t0;
+      if (document.querySelector('#r-close')) done({ first, title: document.querySelector('#sheet h2')?.textContent }); else requestAnimationFrame(loop); };
+    document.querySelector('#x-go').click(); requestAnimationFrame(loop);
+  }));
+  check(fr.first !== null && fr.first < 500 && fr.title === 'Safe to share', `keep original text: progress shows right after Continue (${Math.round(fr.first)} ms, then "${fr.title}")`);
+  await page.click('#r-close'); await page.waitForTimeout(250);
+  await T('reset');
+}
+
 check(errors.length === 0, `no page errors ${errors.join(' | ')}`);
 await browser.close(); server.close();
 console.log(failed ? `\n${failed} CHECK(S) FAILED` : '\nALL UI CHECKS PASSED');
