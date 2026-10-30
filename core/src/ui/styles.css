@@ -318,7 +318,7 @@ details[open] > :not(summary) { animation: rise .22s cubic-bezier(.2, .8, .2, 1)
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; max-height: none; height: 40%;
   border-radius: 20px 20px 0 0; border: 1px solid var(--line); border-bottom: 0;
   box-shadow: 0 -10px 30px rgba(0, 0, 0, .22);
-  transform: translateY(0); transition: transform .34s cubic-bezier(.2, .8, .2, 1), height .32s cubic-bezier(.2, .8, .2, 1);
+  transform: translateY(0); transition: transform .34s cubic-bezier(.2, .8, .2, 1), translate .34s cubic-bezier(.2, .8, .2, 1);
   will-change: transform; overscroll-behavior: contain;
 }
 #panel.enter, #panel.closing { transform: translateY(105%); }
@@ -422,12 +422,20 @@ body:not(.has-doc) .dock { position: fixed; }
 /* Split: the chosen way's options sit in their own box */
 .spbox { border: 1px solid var(--line); border-radius: 14px; padding: 2px 12px 10px; margin-top: 8px; }
 .spbox .segctl { margin-top: 8px; }
+.spbox > .hh:first-child { margin-top: 10px; }
+/* While slide()/swapBox() animate a height: the height is the whole box, and nothing spills out */
+.sliding { box-sizing: border-box; overflow: hidden; }
+.contain { display: flow-root; } .contain[hidden] { display: none; }
 .sheet h3 + .segctl, .sheet h3 + .helpbox + .segctl { margin-top: 6px; }
 
 /* Settings: clear breaks between sections */
 .sheet .sset { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 2px; }
-/* Settings search stays at the top while the list scrolls */
-.sheet .ssearch { position: sticky; top: -20px; z-index: 2; background: var(--surface); margin: 0 -20px; padding: 6px 20px 8px; }
+/* Settings title and search stay at the top while the list scrolls */
+.sheet .ssearch { position: sticky; top: -12px; z-index: 2; background: var(--surface); margin: -20px -20px 0; padding: 20px 20px 10px;
+  border-bottom: 1px solid transparent; }
+.sheet .ssearch h2 { margin-bottom: 10px; }
+.sheet .ssearch.stuck { border-bottom-color: var(--line); }
+.sheet .ssearch { transition: border-color .2s; }
 .sheet .ssearch input { width: 100%; }
 #s-none { margin-top: 12px; }
 .sheet .sset > h3:first-child { margin-top: 14px; }

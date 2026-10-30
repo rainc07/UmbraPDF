@@ -459,12 +459,14 @@ const V = await page.evaluate(async (arr) => {
   const control = await T.ocrRegions(src, boxes.map((b, i) => (i === 0 ? [imgBox] : [])));
   const nbText = await T.text(nb);
   const neg = await T.verifyVector(src, boxes); // the untouched source must fail the vector check
-  return { report: out.report, text, ms, size: out.bytes.length, imgSize: img.bytes.length, out: Array.from(out.bytes),
+  const dark = (await T.boxDarkness(out.bytes, boxes)).flat();
+  return { dark, report: out.report, text, ms, size: out.bytes.length, imgSize: img.bytes.length, out: Array.from(out.bytes),
     under, control, nbText, neg, nBoxes: boxes.map((b) => b.length) };
 }, Array.from(vfx));
 
 check(V.nBoxes[0] >= 5 && V.nBoxes[2] >= 1, `vector: boxes from Find on normal, invisible, Form XObject and rotated text (${V.nBoxes})`);
 check(!V.neg.ok && V.neg.textInBoxes > 0 && V.neg.annotations > 0, `vector: negative control, source fails the check (${V.neg.issues.length} issues: ${V.neg.issues.join('; ').slice(0, 160)})`);
+check(V.dark.length > 5 && V.dark.every((d) => d > 0.97), `vector: every box is solid black where it was drawn, incl. rotated page (${V.dark.map((d) => d.toFixed(2)).join(' ')})`);
 check(V.report.ok, `vector: export verified clean (${V.ms} ms): ${V.report.issues.join('; ') || 'no issues'}`);
 check(!/SECRET|555|777|888|999|4321|Hidden/.test(V.text), `vector: no redacted text extractable ("${V.text.replace(/\s+/g, ' ').slice(0, 120)}")`);
 check(/PUBLIC HEADING/.test(V.text) && /ROT PUBLIC/.test(V.text), 'vector: text outside the boxes is kept and selectable (incl. rotated page)');

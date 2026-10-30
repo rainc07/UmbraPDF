@@ -323,8 +323,30 @@ const helpShut = await page.evaluate(() => document.querySelector('[data-helpbox
 await page.click('[data-help="detect"]');
 const helpOpen = await page.evaluate(() => [!document.querySelector('[data-helpbox="detect"]').hidden, document.querySelector('[data-help="detect"]').getAttribute('aria-expanded')]);
 check(helpShut && helpOpen[0] && helpOpen[1] === 'true', `help: (?) opens the explanation (${helpShut}, ${helpOpen})`);
+{
+  // Title and search stay visible at the bottom of the list.
+  const top = await page.evaluate(async () => {
+    const sh = document.querySelector('#sheet'); sh.scrollTop = 1e6; await new Promise((r) => setTimeout(r, 100));
+    const s = sh.getBoundingClientRect(), h = sh.querySelector('.ssearch h2').getBoundingClientRect(), i = document.querySelector('#s-search').getBoundingClientRect();
+    const r = [sh.scrollTop > 50, h.top >= s.top - 1, i.bottom <= s.top + 160, document.querySelector('.ssearch').classList.contains('stuck')];
+    sh.scrollTop = 0; return r;
+  });
+  check(top.every(Boolean), `settings: title and search stay on top when scrolled to the bottom (${top})`);
+}
 const imgHidden = await page.evaluate(() => document.querySelector('#x-image-opts').hidden);
-await page.click('#x-method [data-m="image"]');
+{
+  // Image settings open with no jump at the end: every frame's step is small, the last ones the smallest.
+  const hs = await page.evaluate(async () => {
+    const el = document.querySelector('#x-image-opts'), next = el.nextElementSibling ?? el.parentElement;
+    const at = () => el.getBoundingClientRect().height;
+    document.querySelector('#x-method [data-m="image"]').click();
+    const out = []; const t0 = performance.now();
+    await new Promise((r) => { const f = () => { out.push(at()); performance.now() - t0 < 500 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
+    return out;
+  });
+  const steps = hs.slice(1).map((h, i) => Math.abs(h - hs[i])).filter((x) => x > 0.05);
+  check(steps.length >= 4 && Math.max(...steps.slice(-2)) <= 4, `motion: Image settings slide open with no jump at the end (last steps ${steps.slice(-3).map((x) => x.toFixed(1)).join(', ')})`);
+}
 await page.selectOption('#x-dpi', '150');
 await page.click('#s-close'); await page.waitForTimeout(250);
 await page.reload();
@@ -400,6 +422,13 @@ await page.click('#s-close'); await page.waitForTimeout(250);
   const half = await page.evaluate(() => document.querySelector('#panel').dataset.snap);
   check(st[0] === 'half' && st[1] >= 38 && st[1] <= 42 && st[2] && full[0] === 'full' && full[1] && peek === 'peek' && half === 'half',
     `panel: opens at 40% with the title bar above the list, drags to full and collapsed, tap brings it back (${st}, ${full}, ${peek}, ${half})`);
+  // A drag only moves the sheet (translate): its height, and so its list's layout, changes once at the start, not every frame.
+  await page.evaluate(() => { window.__rec = []; const p = document.querySelector('#panel'); const f = () => { window.__rec.push(p.offsetHeight); if (window.__rec.length < 60) requestAnimationFrame(f); }; requestAnimationFrame(f); });
+  const g3 = await page.evaluate(() => { const q = document.querySelector('#p-grab').getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; });
+  await page.mouse.move(...g3); await page.mouse.down(); await page.mouse.move(g3[0], g3[1] - 160, { steps: 12 }); await page.mouse.up(); await page.waitForTimeout(700);
+  const hs = await page.evaluate(() => [...new Set(window.__rec)]);
+  const rest = await page.evaluate(() => { const p = document.querySelector('#panel'); return [p.dataset.snap, p.style.translate, p.offsetHeight === parseFloat(document.querySelector('.stage').style.getPropertyValue('--sheet-h'))]; });
+  check(hs.length <= 3 && rest[1] === '' && rest[2], `panel: drag moves the sheet without re-laying it out each frame, then rests at its stop (heights ${hs.join(' ')}, ${rest})`);
   await page.evaluate(() => document.querySelector('#p-close').click()); await page.waitForTimeout(300);
   await T('reset');
 }
