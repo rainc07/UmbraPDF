@@ -183,7 +183,7 @@ async function deflate(data: Uint8Array): Promise<Uint8Array | null> {
 /** Canvas pixels and whether the page is grey (most documents), so lossless can store 1 channel instead of 3. */
 function readPixels(c: HTMLCanvasElement): { px: Uint8ClampedArray; W: number; H: number; gray: boolean } {
   const W = c.width, H = c.height;
-  const px = c.getContext('2d')!.getImageData(0, 0, W, H).data;
+  const px = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, W, H).data;
   let gray = true;
   for (let i = 0; i < px.length; i += 4) {
     const r = px[i], g = px[i + 1], b = px[i + 2];
@@ -301,7 +301,7 @@ export async function exportRedacted(
     const canvas = document.createElement('canvas');
     try {
       await renderToCanvas(page, canvas, scale);
-      const ctx = canvas.getContext('2d', { alpha: false })!;
+      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true })!;
       ctx.fillStyle = '#000';
       const boxesPx = (redactions[i - 1] ?? []).map((r) => toPixels(r, scale));
       for (const b of boxesPx) ctx.fillRect(...b);
@@ -335,7 +335,7 @@ export async function exportRedacted(
         const k = Math.min(1, OCR_MAX_DPI / PT_PER_IN / scale);
         const src = document.createElement('canvas');
         src.width = Math.round(canvas.width * k); src.height = Math.round(canvas.height * k);
-        const c2 = src.getContext('2d', { alpha: false })!;
+        const c2 = src.getContext('2d', { alpha: false, willReadFrequently: true })!;
         c2.imageSmoothingQuality = 'high';
         c2.drawImage(canvas, 0, 0, src.width, src.height);
         c2.fillStyle = '#fff';
