@@ -148,6 +148,7 @@ async function loadFile(file: OpenedFile) {
   S.bytes = file.bytes;
   S.password = password;
   S.verified = null;
+  docExport = null;
   S.applied = [];
   S.sizes = await pageSizes(doc);
   S.boxes = S.sizes.map(() => []);
@@ -652,13 +653,64 @@ applyTheme();
 host.setSecure(prefs.opts.hideRecents);
 setOcrLang(ocrModelFor(prefs.ocrLangs));
 
-const OPTION_ROWS: [keyof Options, string, string][] = [
-  ['closeAfterRedact', 'Close Auto Detect after Redact', 'Go straight back to the document. Reopen Auto Detect to review or undo items in its Redacted tab. Find always stays open.'],
-  ['confirmLeave', 'Ask before leaving unsaved work', 'Back or opening another file asks first if your redactions aren\'t exported.'],
-  ['reviewReminder', 'Remind me to check every page', 'Shows a reminder when exporting. Auto Detect can miss unusual formats.'],
-  ['platesLabelled', 'Vehicle plates only when labelled', 'Only flag plates next to words like “vehicle”, “kenderaan” or “plate”. Fewer false matches.'],
-  ['hideRecents', 'Hide content in Recent apps', 'Blanks the app preview in the app switcher. This also blocks screenshots.'],
-];
+const OPTION_ROWS: Record<keyof Options, [string, string]> = {
+  closeAfterRedact: ['Close Auto Detect after Redact', 'Go straight back to the document. Reopen Auto Detect to review or undo items in its Redacted tab. Find always stays open.'],
+  confirmLeave: ['Ask before leaving unsaved work', 'Back or opening another file asks first if your redactions aren\'t exported.'],
+  reviewReminder: ['Remind me to check every page', 'Shows a reminder when exporting. Auto Detect can miss unusual formats.'],
+  platesLabelled: ['Vehicle plates only when labelled', 'Only flag plates next to words like “vehicle”, “kenderaan” or “plate”. Fewer false matches.'],
+  hideRecents: ['Hide content in Recent apps', 'Blanks the app preview in the app switcher. This also blocks screenshots.'],
+};
+const optRows = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android').map((k) => `<label class="row2"><span>${OPTION_ROWS[k][0]}<small class="hint">${OPTION_ROWS[k][1]}</small></span>
+      <input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}></label>`).join('');
+
+// ---------- (?) help ----------
+/** Longer explanations behind the (?) buttons. */
+const HELP = {
+  detect: `<p>Auto Detect scans every page, scanned ones too, for IC numbers, phone numbers, emails, bank accounts, addresses, labelled names and more. Nothing is blacked out until you tap Redact, and you can untick anything first.</p>
+    <p>Words in “Always redact” (Settings) are found in any case, even when split across lines. To pick which types it looks for, or add your own pattern, open Auto Detect in a document and tap “Choose what to find”.</p>
+    <p>It can miss unusual formats, so always look through every page.</p>`,
+  ocr: `<p>Scanned pages are pictures, so Umbra reads them on your device (OCR) before Find, Auto Detect or a searchable export can use the text. Nothing is uploaded.</p>
+    <p>Each extra language makes scanned pages a little slower to read. Chinese covers Simplified and Traditional, and also reads English.</p>`,
+  export: `<p>Every copy goes through a final safety check before you can save it: no hidden text, links, forms, attachments or file details, and nothing readable under the black boxes. If anything fails, Umbra won't save it.</p>
+    <p><b>Keep original text</b> edits the PDF itself, so it looks like the original, stays sharp and small. If the PDF has hidden text or layers, Umbra stops and asks you to use Image only.</p>
+    <p><b>Image only</b> redraws every page as a picture, so nothing from the original file can survive. Files are bigger and the text is only searchable with OCR.</p>`,
+  image: `<p><b>Quality</b> is the picture resolution. 300 DPI suits most documents, 150 makes small files, 600 is for printing.</p>
+    <p><b>File size</b>: Auto picks per page (lossless for clean pages, JPEG for photos and scans). Sharp is always lossless. Photo is always JPEG.</p>
+    <p><b>Searchable text</b> reads the visible words on your device and adds them invisibly, so you can copy and search them. Blacked-out parts are never included.</p>`,
+  split: `<p>Splitting happens after the safety check, so every file is cut from your checked, redacted copy, never from the original.</p>
+    <p><b>Every N pages</b>: a new file every N pages (1 = one file per page). <b>Ranges</b>: one file per range you type. <b>Halves</b>: one file with each two-page scan cut down the middle.</p>`,
+  find: `<p>Search for any word or phrase. Each search stays as a filter you can remove with ×. Match case and Whole word narrow the results.</p>
+    <p>Scanned pages are read with OCR first, so the first search on a scan can take longer.</p>`,
+};
+type HelpId = keyof typeof HELP;
+const helpBtn = (id: HelpId, what: string) => `<button type="button" class="qhelp" data-help="${id}" aria-expanded="false" aria-label="About ${what}">?</button>`;
+const helpBox = (id: HelpId) => `<div class="helpbox" data-helpbox="${id}" hidden>${HELP[id]}</div>`;
+/** A heading with a (?) that opens the longer explanation right under it. */
+const helpH = (tag: 'h2' | 'h3', title: string, id: HelpId) => `<${tag} class="hh">${title}${helpBtn(id, title)}</${tag}>${helpBox(id)}`;
+const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+/** Show or hide with a short height + fade, so what's below slides instead of jumping. `instant` for first render. */
+function slide(el: HTMLElement, show: boolean, instant = false) {
+  if ((el.dataset.slide ?? String(!el.hidden)) === String(show)) return;
+  el.dataset.slide = String(show);
+  el.getAnimations?.().forEach((a) => a.cancel());
+  if (instant || reduceMotion?.matches || !el.animate) { el.hidden = !show; return; }
+  el.hidden = false;
+  const cs = getComputedStyle(el);
+  const full = { height: `${el.offsetHeight}px`, opacity: 1, marginTop: cs.marginTop, marginBottom: cs.marginBottom, paddingTop: cs.paddingTop, paddingBottom: cs.paddingBottom };
+  const none = { height: '0px', opacity: 0, marginTop: '0px', marginBottom: '0px', paddingTop: '0px', paddingBottom: '0px' };
+  el.style.overflow = 'hidden';
+  const a = el.animate(show ? [none, full] : [full, none], { duration: 220, easing: 'cubic-bezier(.2, .8, .2, 1)' });
+  a.onfinish = () => { el.style.overflow = ''; if (!show) el.hidden = true; };
+}
+document.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-help]');
+  const box = b?.closest('.sheet, #panel')?.querySelector<HTMLElement>(`[data-helpbox="${b.dataset.help}"]`);
+  if (!b || !box) return;
+  e.preventDefault();
+  const open = b.getAttribute('aria-expanded') !== 'true';
+  slide(box, open);
+  b.setAttribute('aria-expanded', String(open));
+});
 
 function settingsDialog() {
   if (S.busy) return;
@@ -666,24 +718,31 @@ function settingsDialog() {
   modal(`<h2>Settings</h2>
     <h3>Appearance</h3>
     <div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div>
-    <h3>Preferences</h3>
-    ${OPTION_ROWS.filter(([k]) => k !== 'hideRecents' || host.name === 'android').map(([k, t, h]) => `<label class="row2"><span>${t}<small class="hint">${h}</small></span>
-      <input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}></label>`).join('')}
-    <h3>Text in scans</h3>
-    ${OCR_LANGS.map((l) => `<label class="row2"><span>${l.label}<small class="hint">${l.hint}</small></span>
-      <input class="switch" type="checkbox" data-lang="${l.id}" ${prefs.ocrLangs.includes(l.id) ? 'checked' : ''}></label>`).join('')}
-    <p class="hint" id="s-lang-hint" hidden>Keep at least one language on.</p>
-    <h3>Always redact</h3>
-    <p class="hint">Names, places or other words Auto Detect should always find, in any case and across line breaks. Kept on this device only.</p>
+    ${helpH('h3', 'Export defaults', 'export')}
+    <p class="hint">What Export starts with. You can still change it each time.</p>
+    ${exportChoiceHtml(prefs.export)}
+    ${helpH('h3', 'Auto Detect', 'detect')}
+    <p class="hint">What Auto Detect looks for and what happens after you redact.</p>
+    <label class="row2" for="s-aw"><span>Always redact<small class="hint">Names, places or other words to always find, in any case and across line breaks. Kept on this device only.</small></span></label>
     <form class="prow" id="s-aw-form"><input id="s-aw" placeholder="Word or phrase, e.g. Tan Ah Kow" autocomplete="off" spellcheck="false" maxlength="200" enterkeyhint="done">
       <button class="primary">Add</button></form>
     <div class="tchips" id="s-aw-list"></div>
+    ${optRows(['platesLabelled', 'closeAfterRedact'])}
+    ${helpH('h3', 'Reading scans (OCR)', 'ocr')}
+    <p class="hint">Which languages Umbra reads on scanned pages.</p>
+    ${OCR_LANGS.map((l) => `<label class="row2"><span>${l.label}<small class="hint">${l.hint}</small></span>
+      <input class="switch" type="checkbox" data-lang="${l.id}" ${prefs.ocrLangs.includes(l.id) ? 'checked' : ''}></label>`).join('')}
+    <p class="hint" id="s-lang-hint" hidden>Keep at least one language on.</p>
+    <h3>Safety</h3>
+    <p class="hint">Reminders and privacy protections.</p>
+    ${optRows(['confirmLeave', 'reviewReminder', 'hideRecents'])}
     <h3>Advanced</h3>
     <label class="row2"><span>Show technical check report<small class="hint">For IT and troubleshooting. The safety check always runs either way.</small></span>
       <input id="s-adv" class="switch" type="checkbox" ${prefs.advanced ? 'checked' : ''}></label>
     <h3>About</h3>
     <p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p>
     <div class="row"><button id="s-close" class="primary">Done</button></div>`, true);
+  bindExportChoice(prefs.export, () => savePrefs());
   $('#sheet').querySelectorAll<HTMLButtonElement>('[data-theme-opt]').forEach((b) => {
     b.onclick = () => {
       prefs.theme = b.dataset.themeOpt as ThemePref; savePrefs(); applyTheme();
@@ -1066,7 +1125,7 @@ function stopBackground() {
 function askStopScan() {
   if (!S.scan) return;
   const auto = S.panel === 'detect';
-  modal(`<h2>${auto ? 'Stop auto redaction?' : 'Stop searching?'}</h2>
+  modal(`<h2>${auto ? 'Stop Auto Detect?' : 'Stop searching?'}</h2>
     <p class="hint">Pages already read are kept, so scanning again picks up where it stopped.</p>
     <div class="row"><button id="st-no">Keep going</button><button id="st-yes" class="primary danger">Stop</button></div>`, true);
   $('#st-no').onclick = closeModal;
@@ -1180,7 +1239,7 @@ function openFind() {
   if (!S.doc) return;
   closePanel('replace');
   S.panel = 'find';
-  showPanel(`<div class="ph"><b>Manual find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
+  showPanel(`<div class="ph"><b>Find</b>${helpBtn('find', 'Find')}<button class="pc" id="p-close" aria-label="Close">×</button></div>${helpBox('find')}
     <form class="prow" id="f-form"><input id="f-q" type="search" placeholder="Word or phrase" enterkeyhint="search" autocomplete="off">
       <button class="primary" data-busy>Find</button></form>
     <div class="chips"><button class="chip" id="f-case" aria-pressed="false">Match case</button><button class="chip" id="f-word" aria-pressed="false">Whole word</button></div>
@@ -1217,11 +1276,11 @@ function openDetect() {
   closePanel('replace');
   S.panel = 'detect';
   const dp = prefs.detect;
-  showPanel(`<div class="ph"><b>Auto find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
+  showPanel(`<div class="ph"><b>Auto Detect</b>${helpBtn('detect', 'Auto Detect')}<button class="pc" id="p-close" aria-label="Close">×</button></div>${helpBox('detect')}
     <div class="prow"><button id="d-go" class="primary" data-busy>Scan document</button></div>
     <p class="hint intro">Finds IC numbers, phones, emails, accounts, addresses and labelled names. Nothing is redacted until you confirm. Use Find for anything it misses.${dp.always.length ? ` Also finds your ${dp.always.length} “Always redact” word${dp.always.length === 1 ? '' : 's'} from Settings.` : ' Names or places to always redact can be added in Settings on the home screen.'}</p>
     <div id="p-status" class="hint" role="status"></div><div id="p-results"></div>
-    <details id="d-cfg"><summary>Advanced config <small class="hint">· choose detectors, custom patterns</small></summary>
+    <details id="d-cfg"><summary>Choose what to find <small class="hint">· types and your own patterns</small></summary>
       <div class="grid" id="d-grid"></div>
       <div id="d-form" class="cform" hidden>
         <div class="prow"><input id="d-label" placeholder="Name, e.g. Staff ID" autocomplete="off"></div>
@@ -1333,70 +1392,77 @@ const exportKey = (opts: ExportOptions, method: 'vector' | 'image') =>
 const ICON_OK = '<svg class="ico" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_BAD = '<svg class="ico" viewBox="0 0 24 24"><path d="M12 7v6M12 17h.01"/></svg>';
 
+/** Export choices this document was last exported with; Settings → Export defaults otherwise. Not saved. */
+let docExport: ExportPrefs | null = null;
+
+/** Method + image settings: shared by the Export dialog and Settings → Export defaults (never open together). */
+function exportChoiceHtml(e: ExportPrefs): string {
+  return `<div class="segctl" id="x-method">
+      <button data-m="vector" aria-pressed="${e.method === 'vector'}">Keep original text</button>
+      <button data-m="image" aria-pressed="${e.method === 'image'}">Image only</button></div>
+    <p class="hint" id="x-desc"></p>
+    <div id="x-image-opts">
+    ${helpH('h3', 'Image settings', 'image')}
+    <label class="row2"><span>Quality</span><select id="x-dpi">
+      ${[[150, 'Small file'], [200, 'Good'], [300, 'High (recommended)'], [400, 'Very high'], [600, 'Print']].map(([d, l]) =>
+        `<option value="${d}"${d === e.dpi ? ' selected' : ''}>${l} · ${d} DPI</option>`).join('')}
+    </select></label>
+    <label class="row2"><span>File size</span><select id="x-fmt">
+      ${([['auto', 'Auto (smallest file)'], ['png', 'Sharp (lossless, larger)'], ['jpeg', 'Photo (JPEG)']] as const).map(([v, l]) =>
+        `<option value="${v}"${e.compression === v ? ' selected' : ''}>${l}</option>`).join('')}
+    </select></label>
+    <label class="row2"><span>Searchable text (OCR)
+      <small class="hint">Lets you copy and search the visible words. Blacked-out parts are never included.</small></span>
+      <input id="x-search" class="switch" type="checkbox" ${e.searchable ? 'checked' : ''}></label>
+    </div>`;
+}
+
+/** Wire exportChoiceHtml: every change is written into `e`, then `changed` runs. */
+function bindExportChoice(e: ExportPrefs, changed: () => void) {
+  const DESC = {
+    vector: 'Recommended. Removes what\'s under your boxes and keeps the rest as real text. Looks like the original, small and searchable.',
+    image: 'Strongest. Every page becomes a picture with nothing else kept. Bigger files.',
+  };
+  const show = (instant = false) => {
+    $('#x-desc').textContent = DESC[e.method];
+    slide($('#x-image-opts'), e.method === 'image', instant);
+    $('#x-method').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === e.method)));
+  };
+  $('#x-method').onclick = (ev) => {
+    const b = (ev.target as HTMLElement).closest<HTMLElement>('[data-m]');
+    if (!b) return;
+    e.method = b.dataset.m as ExportPrefs['method']; show(); changed();
+  };
+  $('#x-dpi').onchange = () => { e.dpi = Number($<HTMLSelectElement>('#x-dpi').value); changed(); };
+  $('#x-fmt').onchange = () => { e.compression = $<HTMLSelectElement>('#x-fmt').value as ExportPrefs['compression']; changed(); };
+  $('#x-search').onchange = () => { e.searchable = $<HTMLInputElement>('#x-search').checked; changed(); };
+  show(true);
+}
+
 function exportDialog() {
   const total = S.boxes.reduce((n, b) => n + b.length, 0);
   const pending = S.sugg.filter((x) => x.on).length;
-  const m0 = prefs.export.method;
-  modal(`<h2>Save a redacted copy</h2>
-    <div class="segctl" id="x-method">
-      <button data-m="vector" aria-pressed="${m0 === 'vector'}">Keep original text</button>
-      <button data-m="image" aria-pressed="${m0 === 'image'}">Image only</button></div>
-    <p class="hint" id="x-desc"></p>
+  const ex: ExportPrefs = { ...(docExport ?? prefs.export) };
+  modal(`${helpH('h2', 'Save a redacted copy', 'export')}
     ${total ? '' : '<p class="note">Nothing is redacted. That\'s fine: you\'ll still get a cleaned copy, searchable too if OCR is on.</p>'}
     ${pending ? `<p class="fail">${pending} found item(s) aren't redacted yet. Tap "Redact" in the panel first.</p>` : ''}
     ${prefs.opts.reviewReminder && total ? '<p class="note">Before exporting, scroll through every page. Auto Detect and Find can miss unusual formats.</p>' : ''}
-    <div id="x-image-opts">
-    <label class="row2"><span>Quality</span><select id="x-dpi">
-      ${[[150, 'Small file'], [200, 'Good'], [300, 'High (recommended)'], [400, 'Very high'], [600, 'Print']].map(([d, l]) =>
-        `<option value="${d}"${d === prefs.export.dpi ? ' selected' : ''}>${l} · ${d} DPI</option>`).join('')}
-    </select></label>
-    <label class="row2"><span>Compression</span><select id="x-fmt">
-      ${([['auto', 'Auto (smallest file)'], ['png', 'Sharp (lossless, larger)'], ['jpeg', 'Photo (JPEG)']] as const).map(([v, l]) =>
-        `<option value="${v}"${prefs.export.compression === v ? ' selected' : ''}>${l}</option>`).join('')}
-    </select></label>
-    <label class="row2"><span>Keep text selectable &amp; searchable (OCR)
-      <small class="hint">Reads the visible text on your device so you can copy and search it. Blacked-out parts are never included.</small></span>
-      <input id="x-search" class="switch" type="checkbox" ${prefs.export.searchable ? 'checked' : ''}></label>
-    </div>
-    <label class="row2"><span>Split into several files
-      <small class="hint">Per page, by page ranges, or each page cut in half. Pages are cut from the checked copy.</small></span>
-      <input id="x-split" class="switch" type="checkbox"></label>
-    <div id="x-split-opts" hidden>${splitOptionsHtml(S.sizes.length)}</div>
+    <h3>How to remove content</h3>
+    ${exportChoiceHtml(ex)}
+    ${helpH('h3', 'Split into files', 'split')}
+    ${splitOptionsHtml(S.sizes.length)}
     <div class="row"><button id="x-cancel">Cancel</button><button id="x-go" class="primary">Continue</button></div>`, true);
-  let method = m0;
-  const splitOn = () => $<HTMLInputElement>('#x-split').checked;
-  const split = bindSplitOptions(S.sizes.length, splitOn, $<HTMLButtonElement>('#x-go'));
-  $('#x-split').onchange = () => { $('#x-split-opts').hidden = !splitOn(); split.refresh(); };
-  const DESC = {
-    vector: 'Recommended. Text, shapes and image parts under your boxes are removed from the file itself; everything else stays as real text, so the copy looks like the original, stays small and is fully searchable.',
-    image: 'Maximum safety. Every page becomes a picture with your boxes burned in and nothing else from the original is kept. Larger files; text is searchable only with OCR.',
-  };
-  const showMethod = () => {
-    $('#x-desc').textContent = DESC[method];
-    $('#x-image-opts').hidden = method !== 'image';
-    $('#x-method').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === method)));
-  };
-  $('#x-method').onclick = (e) => {
-    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]');
-    if (!b) return;
-    method = b.dataset.m as typeof method; showMethod();
-    $('#x-image-opts').animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 180 });
-  };
-  showMethod();
+  const split = bindSplitOptions(S.sizes.length, $<HTMLButtonElement>('#x-go'));
   // Start loading the redaction engine (~10 MB WASM) while the user reads the dialog.
-  const warm = () => { if (method === 'vector') void loadMuPdf().catch(() => {}); };
+  const warm = () => { if (ex.method === 'vector') void loadMuPdf().catch(() => {}); };
+  bindExportChoice(ex, warm);
   warm();
-  $('#x-method').addEventListener('click', warm);
   $('#x-cancel').onclick = closeModal;
   $('#x-go').onclick = async () => {
-    const opts: ExportOptions = {
-      ...DEFAULT_EXPORT,
-      dpi: Number($<HTMLSelectElement>('#x-dpi').value),
-      format: $<HTMLSelectElement>('#x-fmt').value as ExportOptions['format'],
-      searchable: $<HTMLInputElement>('#x-search').checked,
-    };
-    prefs.export = { dpi: opts.dpi, compression: opts.format, searchable: opts.searchable, method }; savePrefs();
-    const spec = splitOn() ? split.spec() : null;
+    const method = ex.method;
+    const opts: ExportOptions = { ...DEFAULT_EXPORT, dpi: ex.dpi, format: ex.compression, searchable: ex.searchable };
+    docExport = ex;
+    const spec = split.spec();
     modal(`<h2>Preparing your copy…</h2><p id="x-msg" class="hint">Starting</p><progress id="x-bar" max="1" value="0"></progress>`);
     S.busy = true; syncToolbar();
     const w = startWork('Preparing your redacted copy');
@@ -1505,18 +1571,19 @@ const sizeText = (n: number) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB`
 function splitOptionsHtml(n: number): string {
   const L = lastSplit;
   return `<div class="segctl" id="sp-mode">
-      <button data-m="every">Per page</button><button data-m="ranges">Ranges</button><button data-m="half">Halves</button></div>
-    <div id="sp-every">
-      <label class="row2"><span>Pages in each file</span><input id="sp-n" type="number" min="1" max="${n}" value="${Math.min(L.every, n)}" inputmode="numeric" style="width:6em"></label>
+      <button data-m="none">One file</button><button data-m="every">Every N</button><button data-m="ranges">Ranges</button><button data-m="half">Halves</button></div>
+    <div class="spbox" id="sp-every">
+      <label class="row2"><span>Pages in each file<small class="hint">1 gives one file per page.</small></span>
+        <input id="sp-n" type="number" min="1" max="${n}" value="${Math.min(L.every, n)}" inputmode="numeric" style="width:6em"></label>
     </div>
-    <div id="sp-ranges">
-      <p class="hint">One file per range, for example <b>1-3, 4, 8-</b> (8- means 8 to the end). Pages not listed are left out.</p>
+    <div class="spbox" id="sp-ranges">
+      <label class="row2 stack" for="sp-r"><span>Page ranges<small class="hint">One file per range, for example <b>1-3, 4, 8-</b> (8- means 8 to the end). Pages not listed are left out.</small></span></label>
       <input id="sp-r" placeholder="1-3, 4, 8-" autocomplete="off" spellcheck="false" inputmode="text" enterkeyhint="done" value="${esc(L.ranges)}" style="width:100%">
     </div>
-    <div id="sp-half">
+    <div class="spbox" id="sp-half">
       <p class="hint">For scans with two pages side by side. You get one PDF with every page cut in two.</p>
       <div class="segctl" id="sp-cut"><button data-c="lr">Left | Right</button><button data-c="tb">Top / Bottom</button></div>
-      <label class="row2"><span>Only cut pages that are wider than tall
+      <label class="row2"><span><span id="sp-wide-t">Only cut pages that are wider than tall</span>
         <small class="hint">A cover or single page in the scan stays whole.</small></span>
         <input id="sp-wide" class="switch" type="checkbox" ${L.widerOnly ? 'checked' : ''}></label>
       <label class="row2" id="sp-rtl-row"><span>Right page first
@@ -1526,24 +1593,25 @@ function splitOptionsHtml(n: number): string {
     <p class="note" id="sp-plan"></p>`;
 }
 
-/** Wire the split options; `go` is disabled while they don't make sense. Returns the chosen split. */
-function bindSplitOptions(n: number, active: () => boolean, go: HTMLButtonElement): { spec: () => SplitSpec; refresh: () => void } {
-  let mode = lastSplit.mode, cut = lastSplit.cut;
-  const spec = (): SplitSpec => mode === 'every'
+/** Wire the split options; `go` is disabled while they don't make sense. `spec()` is null for one file. */
+function bindSplitOptions(n: number, go: HTMLButtonElement): { spec: () => SplitSpec | null } {
+  let mode: SplitSpec['mode'] | 'none' = 'none', cut = lastSplit.cut;
+  const spec = (): SplitSpec | null => mode === 'none' ? null : mode === 'every'
     ? { mode, every: Math.max(1, Math.min(n, Math.floor(Number($<HTMLInputElement>('#sp-n').value) || 1))) }
     : mode === 'ranges' ? { mode, ranges: $<HTMLInputElement>('#sp-r').value }
     : { mode, cut, rtl: cut === 'lr' && $<HTMLInputElement>('#sp-rtl').checked, widerOnly: $<HTMLInputElement>('#sp-wide').checked };
-  const show = () => {
-    for (const m of ['every', 'ranges', 'half']) $(`#sp-${m}`).hidden = m !== mode;
+  const show = (instant = false) => {
+    for (const m of ['every', 'ranges', 'half']) slide($(`#sp-${m}`), m === mode, instant);
     $('#sp-mode').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === mode)));
     $('#sp-cut').querySelectorAll<HTMLElement>('[data-c]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.c === cut)));
-    $('#sp-rtl-row').hidden = cut !== 'lr';
-    $('#sp-wide').closest('label')!.querySelector('span')!.firstChild!.textContent = cut === 'lr' ? 'Only cut pages that are wider than tall' : 'Only cut pages that are taller than wide';
+    slide($('#sp-rtl-row'), cut === 'lr', instant);
+    $('#sp-wide-t').textContent = cut === 'lr' ? 'Only cut pages that are wider than tall' : 'Only cut pages that are taller than wide';
     const plan = $('#sp-plan');
     let ok = true;
     try {
       const s = spec();
-      if (s.mode === 'half') {
+      if (!s) plan.textContent = `1 file, ${n} page${n === 1 ? '' : 's'}`;
+      else if (s.mode === 'half') {
         const cuts = S.sizes.filter((z) => !s.widerOnly || (s.cut === 'lr' ? z.width > z.height : z.height > z.width)).length;
         plan.textContent = cuts ? `1 file, ${n + cuts} pages (${cuts} of ${n} cut in half)` : `No page is ${s.cut === 'lr' ? 'wider than tall' : 'taller than wide'}, so nothing would be cut.`;
         ok = cuts > 0;
@@ -1558,13 +1626,17 @@ function bindSplitOptions(n: number, active: () => boolean, go: HTMLButtonElemen
       plan.classList.add('fail');
       ok = false;
     }
-    go.disabled = active() && !ok;
+    go.disabled = !ok;
   };
-  $('#sp-mode').onclick = (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]'); if (b) { mode = b.dataset.m as typeof mode; show(); } };
+  $('#sp-mode').onclick = (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]');
+    if (!b) return;
+    mode = b.dataset.m as typeof mode; show();
+  };
   $('#sp-cut').onclick = (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-c]'); if (b) { cut = b.dataset.c as typeof cut; show(); } };
-  for (const id of ['#sp-n', '#sp-r', '#sp-wide', '#sp-rtl']) $(id).addEventListener('input', show);
-  show();
-  return { spec: () => { const v = spec(); lastSplit = { ...lastSplit, ...v }; return v; }, refresh: show };
+  for (const id of ['#sp-n', '#sp-r', '#sp-wide', '#sp-rtl']) $(id).addEventListener('input', () => show());
+  show(true);
+  return { spec: () => { const v = spec(); if (v) lastSplit = { ...lastSplit, ...v }; return v; } };
 }
 
 function splitResult(parts: SplitPart[], timings: [string, number][] = []) {
@@ -1711,6 +1783,7 @@ syncToolbar();
   boxes: () => S.boxes,
   zoom: () => S.zoom,
   detectPrefs: () => prefs.detect,
+  exportPrefs: () => prefs.export,
   setAlways: (w: string[]) => { prefs.detect.always = cleanAlways(w); savePrefs(); return prefs.detect.always; },
   pageText: async (i: number) => (await S.texts!.get(i)).text,
   pageWords: async (i: number) => pageTextWords(await S.texts!.get(i)).map(({ text, line, x0, y0, x1, y1 }) => ({ text, line, x0, y0, x1, y1 })),

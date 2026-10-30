@@ -398,3 +398,20 @@ body:not(.has-doc) #empty { margin: 0 auto; }
 /* The page itself never scrolls (only the document viewer does); the hidden dock must not add height. */
 html, body { overflow: hidden; }
 body:not(.has-doc) .dock { position: fixed; }
+
+/* (?) help: a heading's button opens the longer explanation right under it */
+.hh { display: flex; align-items: center; gap: 8px; }
+.qhelp { flex: none; width: 22px; height: 22px; min-height: 0; padding: 0; border-radius: 50%; border: 1px solid var(--line);
+  background: transparent; color: var(--muted); font-size: .74rem; font-weight: 700; line-height: 1; letter-spacing: 0; text-transform: none;
+  position: relative; }
+.qhelp::before { content: ""; position: absolute; inset: -11px; } /* bigger touch target */
+.qhelp[aria-expanded="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+#panel .ph .qhelp { margin-right: auto; margin-left: 8px; }
+.qhelp, .segctl button { transition: background-color .2s, color .2s, border-color .2s, box-shadow .2s; }
+.helpbox { background: var(--surface-2); color: var(--text); border-radius: 12px; padding: 10px 12px; margin: 4px 0 10px;
+  font-size: .86rem; line-height: 1.45; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.helpbox p { margin: 0 0 6px; } .helpbox p:last-child { margin: 0; }
+/* Split: the chosen way's options sit in their own box */
+.spbox { border: 1px solid var(--line); border-radius: 14px; padding: 2px 12px 10px; margin-top: 8px; }
+.spbox .segctl { margin-top: 8px; }
+.sheet h3 + .segctl, .sheet h3 + .helpbox + .segctl { margin-top: 6px; }
