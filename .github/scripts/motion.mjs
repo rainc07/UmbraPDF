@@ -4,8 +4,12 @@
 import { writeFileSync } from 'node:fs';
 
 const out = process.argv[2] ?? 'motion';
-const pages = await (await fetch('http://127.0.0.1:9222/json')).json();
-const target = pages.find((p) => p.type === 'page' && p.webSocketDebuggerUrl);
+// The WebView's DevTools socket can take a few seconds to answer after launch.
+let target, pages;
+for (let i = 0; i < 30 && !target; i++) {
+  try { pages = await (await fetch('http://127.0.0.1:9222/json')).json(); target = pages.find((p) => p.type === 'page' && p.webSocketDebuggerUrl); } catch {}
+  if (!target) await new Promise((r) => setTimeout(r, 1000));
+}
 if (!target) throw new Error(`no WebView page over DevTools: ${JSON.stringify(pages)}`);
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
@@ -18,6 +22,13 @@ async function run(fn, ...args) {
   return d.result?.result?.value;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Waits until `sel` exists (and is enabled); otherwise fails with what's on screen. */
+async function waitFor(sel, ms = 15000) {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200))
+    if (await run((s) => { const e = document.querySelector(s); return !!e && !e.disabled; }, sel)) return;
+  const seen = await run(() => document.querySelector('.modal:not([hidden]), #panel:not([hidden])')?.innerText?.slice(0, 300) ?? document.body.className);
+  throw new Error(`${sel} never appeared; on screen: ${seen}`);
+}
 
 /** Clicks `click`, then records `watch`'s top every frame until it has settled. */
 const track = (watch, click) => run(async (watch, click) => {
@@ -58,6 +69,7 @@ await run(() => new Promise((r) => { const f = () => (document.getElementById('s
 
 // Settings → Export defaults: Image settings open and close; what's below (Always redact's Add) is watched.
 await run(() => document.querySelector('#btn-settings').click());
+await waitFor('#x-method');
 await sleep(600);
 for (let i = 0; i < 2; i++) {
   const on = await run(() => !document.querySelector('#x-image-opts').hidden);
@@ -96,10 +108,12 @@ await run(async () => {
   const all = new Uint8Array(len); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
   await window.__umbraTest.load(all);
 });
+await waitFor('#btn-export');
 await sleep(2500);
 
 // Export dialog: the same switch, then Split's ways (one box in place of another).
 await run(() => document.querySelector('#btn-export').click());
+await waitFor('#x-image-opts');
 await sleep(700);
 const xOn = await run(() => !document.querySelector('#x-image-opts').hidden);
 const below = '#sp-mode';
@@ -116,7 +130,9 @@ await sleep(600);
 
 // Auto Detect panel: collapse and expand while it reads the scanned page. Main-thread frame times only
 // (the emulator draws in software, so this is a rough guide, not a pass/fail).
+await waitFor('#btn-detect');
 await run(() => document.querySelector('#btn-detect').click());
+await waitFor('#p-grab');
 await sleep(500);
 const sheet = [];
 for (let i = 0; i < 4; i++) {
