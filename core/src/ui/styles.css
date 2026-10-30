@@ -203,6 +203,13 @@ body:not(.has-doc) .dock { display: none; }
   padding: calc(var(--sat) + 16px) 10px calc(var(--sab) + 10px); animation: fade .2s ease;
 }
 @media (min-width: 640px) { .modal { place-items: center; } }
+/* Phone: a dialog whose options open and close (Export) fills the height, so only its content moves, never its edge.
+   The buttons stay at the bottom. */
+@media (max-width: 639px) {
+  .sheet.fill { height: 100%; }
+  .sheet.fill > .fillbody { display: flow-root; min-height: calc(100% - 64px); }
+  .sheet.fill > .row { position: sticky; bottom: -20px; z-index: 2; background: var(--surface); margin: 0 -20px -20px; padding: 12px 20px 20px; }
+}
 @keyframes fade { from { opacity: 0; } }
 .modal[hidden] { display: none; }
 .sheet {

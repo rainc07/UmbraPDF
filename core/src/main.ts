@@ -65,10 +65,11 @@ function toast(msg: string, ms = 2600) {
 /** dismissable: tapping the dimmed background (or Back) closes it. Off for progress and must-answer dialogs. */
 let modalDismissable = false;
 let modalOnDismiss: (() => void) | null = null;
-function modal(html: string, dismissable = false, onDismiss: (() => void) | null = null) {
+/** `fill`: on a phone the sheet takes the whole height, so options opening and closing inside it never resize it. */
+function modal(html: string, dismissable = false, onDismiss: (() => void) | null = null, fill = false) {
   const wasOpen = !$('#modal').hidden && !$('#modal').classList.contains('closing');
   clearTimeout(modalCloseTimer); $('#modal').classList.remove('closing');
-  $('#toast').classList.remove('show'); $('#sheet').innerHTML = html; $('#sheet').onscroll = null; $('#modal').hidden = false;
+  $('#toast').classList.remove('show'); $('#sheet').innerHTML = html; $('#sheet').onscroll = null; $('#sheet').classList.toggle('fill', fill); $('#modal').hidden = false;
   // Step to step (options → progress → result): cross-fade the content instead of jumping.
   if (wasOpen) $('#sheet').animate?.([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], { duration: 200, easing: 'ease-out' });
   modalDismissable = dismissable; modalOnDismiss = onDismiss;
@@ -697,7 +698,10 @@ const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 const EASE = 'cubic-bezier(.2, .8, .2, 1)';
 /** Its children's margins stay inside it, so its height while animating is the height it ends with (no jump at the end). */
 function contain(el: HTMLElement) {
-  if (!el.hidden && !el.classList.contains('contain') && getComputedStyle(el).display === 'block') el.classList.add('contain');
+  for (const e of [el, el.parentElement]) {
+    // The parent too: otherwise a margin next to `el` overlaps the parent's own once `el` is gone, but not while it shrinks.
+    if (e && !e.hidden && !e.classList.contains('contain') && getComputedStyle(e).display === 'block') e.classList.add('contain');
+  }
 }
 /**
  * Bottom margin for a slid-away box: gone, the margins above and below it overlap (collapse) into the larger
@@ -710,7 +714,9 @@ function goneMargin(el: HTMLElement): string {
   const prev = near(el.previousElementSibling, false), next = near(el.nextElementSibling, true);
   const pm = prev ? Math.max(0, parseFloat(getComputedStyle(prev).marginBottom) || 0) : 0;
   const nm = next ? Math.max(0, parseFloat(getComputedStyle(next).marginTop) || 0) : 0;
-  return `${-Math.min(pm, nm)}px`;
+  // A border never animates below 1 px (Chrome), so its box keeps them at height 0: pull them back too.
+  const cs = getComputedStyle(el), bw = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+  return `${-Math.min(pm, nm) - bw}px`;
 }
 /** Run a height animation on `el` (border-box, clipped), then hand it back to normal layout. */
 function animateHeight(el: HTMLElement, frames: Keyframe[], duration: number, done?: () => void) {
@@ -725,13 +731,13 @@ function slide(el: HTMLElement, show: boolean, instant = false) {
   if ((el.dataset.slide ?? String(!el.hidden)) === String(show)) return;
   el.dataset.slide = String(show);
   el.getAnimations?.().forEach((a) => a.cancel());
+  contain(el);
   if (instant || reduceMotion?.matches || !el.animate) { el.hidden = !show; contain(el); return; }
   el.hidden = false;
   contain(el);
   const cs = getComputedStyle(el);
-  const full = { height: `${el.offsetHeight}px`, opacity: 1, marginTop: cs.marginTop, marginBottom: cs.marginBottom, paddingTop: cs.paddingTop,
-    paddingBottom: cs.paddingBottom, borderTopWidth: cs.borderTopWidth, borderBottomWidth: cs.borderBottomWidth };
-  const none = { height: '0px', opacity: 0, marginTop: '0px', marginBottom: goneMargin(el), paddingTop: '0px', paddingBottom: '0px', borderTopWidth: '0px', borderBottomWidth: '0px' };
+  const full = { height: `${el.offsetHeight}px`, opacity: 1, marginTop: cs.marginTop, marginBottom: cs.marginBottom, paddingTop: cs.paddingTop, paddingBottom: cs.paddingBottom };
+  const none = { height: '0px', opacity: 0, marginTop: '0px', marginBottom: goneMargin(el), paddingTop: '0px', paddingBottom: '0px' };
   animateHeight(el, show ? [none, full] : [full, none], 240, () => { if (!show) el.hidden = true; });
 }
 /**
@@ -1676,7 +1682,7 @@ function exportDialog() {
   const total = S.boxes.reduce((n, b) => n + b.length, 0);
   const pending = S.sugg.filter((x) => x.on).length;
   const ex: ExportPrefs = { ...(docExport ?? prefs.export) };
-  modal(`<h2>Save a redacted copy</h2>
+  modal(`<div class="fillbody"><h2>Save a redacted copy</h2>
     ${total ? '' : '<p class="note">Nothing is redacted. That\'s fine: you\'ll still get a cleaned copy, searchable too if OCR is on.</p>'}
     ${pending ? `<p class="fail">${pending} found item(s) aren't redacted yet. Tap "Redact" in the panel first.</p>` : ''}
     ${prefs.opts.reviewReminder && total ? '<p class="note">Before exporting, scroll through every page. Auto Detect and Find can miss unusual formats.</p>' : ''}
@@ -1684,7 +1690,7 @@ function exportDialog() {
     ${exportChoiceHtml(ex)}
     ${helpH('h3', 'Split into files', 'split')}
     ${splitOptionsHtml(S.sizes.length)}
-    <div class="row"><button id="x-cancel">Cancel</button><button id="x-go" class="primary">Continue</button></div>`, true);
+    </div><div class="row"><button id="x-cancel">Cancel</button><button id="x-go" class="primary">Continue</button></div>`, true, null, true);
   const split = bindSplitOptions(S.sizes.length, $<HTMLButtonElement>('#x-go'));
   // Start loading the redaction engine (~10 MB WASM) while the user reads the dialog, after any animation
   // (loading it holds this thread for a moment).

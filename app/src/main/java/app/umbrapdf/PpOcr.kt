@@ -232,7 +232,7 @@ class PpOcr(private val load: (String) -> ByteArray) {
     private class Rec(val text: String, val conf: Float, val chars: List<Triple<String, Float, Float>>)
 
     // Threads reading line batches side by side (recognition), one ONNX Runtime run each.
-    private val recPool by lazy { Executors.newFixedThreadPool(recThreads) { r -> Thread(r, "umbra-rec").apply { isDaemon = true } } }
+    private val recPool by lazy { Executors.newFixedThreadPool(recThreads) { r -> ocrThread(r, "umbra-rec").apply { isDaemon = true } } }
 
     private fun recognise(strips: List<FloatArray>, widths: IntArray): Array<Rec> {
         val res = arrayOfNulls<Rec>(strips.size)
@@ -396,6 +396,20 @@ class PpOcr(private val load: (String) -> ByteArray) {
     fun close() { det?.close(); rec?.close(); det = null; rec = null; recLang = null }
 
     companion object {
+        /**
+         * OCR threads run a little below normal priority, so the screen (scrolling, the panel, animations) gets a core
+         * the moment it needs one. They lose almost nothing when the screen is still. Kept under
+         * THREAD_PRIORITY_BACKGROUND (10), which would also move them to the slow cores.
+         */
+        const val OCR_PRIORITY = 4
+
+        /** A thread at [OCR_PRIORITY]. ONNX Runtime's own threads, started from one, inherit it. */
+        fun ocrThread(r: Runnable, name: String) = Thread({
+            // Off a device (JVM unit tests) the Android call isn't there: run at normal priority rather than not at all.
+            try { android.os.Process.setThreadPriority(OCR_PRIORITY) } catch (_: Throwable) { }
+            r.run()
+        }, name)
+
         private const val BATCH = 4 // lines per recognition run
         /** Space weight in a gap between two characters above which a space is written (the space is the last class). */
         private const val SPACE_IN_GAP = 0.05f
