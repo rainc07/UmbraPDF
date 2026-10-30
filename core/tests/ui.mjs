@@ -224,7 +224,7 @@ await page.setViewportSize({ width: 412, height: 860 }); await page.waitForTimeo
   await T('back'); await page.click('#st-yes');
   await page.evaluate(() => window.__scan);
   const after = await page.evaluate(() => ({ scanning: window.__umbraTest.scanning(), status: document.querySelector('#p-status')?.textContent ?? '', stop: !!document.querySelector('#p-stop') }));
-  check(stopBtn && asked === 'Stop auto redaction?', `scan: Stop button shown, Back asks "${asked}"`);
+  check(stopBtn && asked === 'Stop Auto Detect?', `scan: Stop button shown, Back asks "${asked}"`);
   check(still, 'scan: "Keep going" carries on');
   check(!after.scanning && /^Stopped/.test(after.status) && !after.stop, `scan: Stop ends it (${after.status})`);
 }
@@ -312,6 +312,41 @@ check(JSON.stringify(awSaved) === '["Tan Ah Kow","Ali"]', `always redact: removi
   const al = hits.filter((h) => h.label === 'Always redact');
   check(al.length === 2 && al.every((h) => h.label === 'Always redact'), `always redact: Auto Detect finds both words, "Ali" not inside "Alibaba" (${JSON.stringify(hits)})`);
   check(al.some((h) => /^TAN AH\s+KOW$/.test(h.text) && h.boxes === 2), `always redact: phrase split across two lines is found (${JSON.stringify(al)})`);
+  await T('reset');
+}
+
+// Settings: (?) opens its help under the heading; Export defaults are saved and are what Export starts with.
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+const helpShut = await page.evaluate(() => document.querySelector('[data-helpbox="detect"]').hidden);
+await page.click('[data-help="detect"]');
+const helpOpen = await page.evaluate(() => [!document.querySelector('[data-helpbox="detect"]').hidden, document.querySelector('[data-help="detect"]').getAttribute('aria-expanded')]);
+check(helpShut && helpOpen[0] && helpOpen[1] === 'true', `help: (?) opens the explanation (${helpShut}, ${helpOpen})`);
+const imgHidden = await page.evaluate(() => document.querySelector('#x-image-opts').hidden);
+await page.click('#x-method [data-m="image"]');
+await page.selectOption('#x-dpi', '150');
+await page.click('#s-close'); await page.waitForTimeout(250);
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+const xp = await page.evaluate(() => window.__umbraTest.exportPrefs());
+check(imgHidden && xp.method === 'image' && xp.dpi === 150, `export defaults: saved from Settings (${imgHidden}, ${JSON.stringify(xp)})`);
+{
+  const d4 = await PDFDocument.create(); d4.addPage([612, 792]); d4.addPage([612, 792]);
+  await page.evaluate(async (a) => { await window.__umbraTest.load(new Uint8Array(a)); }, Array.from(await d4.save()));
+  await page.click('#btn-export'); await page.waitForTimeout(250);
+  const dlg = await page.evaluate(() => [document.querySelector('#x-method [data-m="image"]').getAttribute('aria-pressed'), document.querySelector('#x-dpi').value,
+    document.querySelector('#sp-mode [data-m="none"]').getAttribute('aria-pressed'), document.querySelector('#sp-plan').textContent]);
+  check(dlg[0] === 'true' && dlg[1] === '150' && dlg[2] === 'true' && dlg[3] === '1 file, 2 pages', `export dialog starts from the defaults, one file (${dlg})`);
+  await page.click('#x-method [data-m="vector"]');
+  await page.click('#sp-mode [data-m="ranges"]'); await page.fill('#sp-r', '9');
+  const bad = await page.evaluate(() => document.querySelector('#x-go').disabled);
+  await page.click('#sp-mode [data-m="none"]');
+  const good = await page.evaluate(() => !document.querySelector('#x-go').disabled);
+  check(bad && good, `split: impossible range blocks Continue, One file allows it again (${bad}, ${good})`);
+  await page.click('#x-cancel'); await page.waitForTimeout(250);
+  const xp2 = await page.evaluate(() => window.__umbraTest.exportPrefs());
+  check(xp2.method === 'image', `export dialog changes don't overwrite Settings defaults (${JSON.stringify(xp2)})`);
   await T('reset');
 }
 

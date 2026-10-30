@@ -755,7 +755,6 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
     });
     const exportSplit = () => {
       document.querySelector('#btn-export').click();
-      const sw = document.querySelector('#x-split'); sw.checked = true; sw.dispatchEvent(new Event('change'));
       document.querySelector('#sp-mode [data-m="every"]').click();
       document.querySelector('#x-go').click();
     };
