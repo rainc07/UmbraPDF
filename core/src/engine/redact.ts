@@ -231,11 +231,11 @@ function sampleRows(H: number): number[] {
 /** Lossless (Flate) or JPEG bytes for the page, per opts.format. */
 async function encodePage(canvas: HTMLCanvasElement, opts: ExportOptions):
   Promise<{ flate: Uint8Array; colors: 1 | 3 } | { jpeg: Uint8Array }> {
-  if (opts.format === 'jpeg') return { jpeg: await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
+  if (opts.format === 'jpeg') return { jpeg: canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
   const pix = readPixels(canvas);
   let jpeg: Uint8Array | null = null;
   if (opts.format === 'auto') {
-    jpeg = await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality);
+    jpeg = canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality);
     // Scans (paper grain, photos) compress poorly without loss: skip the full lossless pass when a sample says so.
     const rows = sampleRows(pix.H);
     const est = await deflate(losslessPixels(pix, rows).data);
@@ -244,18 +244,25 @@ async function encodePage(canvas: HTMLCanvasElement, opts: ExportOptions):
   }
   const lossless = losslessPixels(pix);
   const flate = await deflate(lossless.data);
-  if (!flate) return { jpeg: jpeg ?? await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
+  if (!flate) return { jpeg: jpeg ?? canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
   if (jpeg && flate.length > jpeg.length * AUTO_LOSSLESS_MAX) return { jpeg };
   return { flate, colors: lossless.colors };
 }
 
-function canvasToBytes(c: HTMLCanvasElement, type: string, q?: number): Promise<Uint8Array> {
-  return new Promise((res, rej) =>
-    c.toBlob(async (b) => {
-      if (!b) return rej(new Error('Canvas encode failed (page too large for this device?)'));
-      res(new Uint8Array(await b.arrayBuffer()));
-    }, type, q),
-  );
+/**
+ * JPEG/PNG bytes of a canvas. Not toBlob: Chromium encodes toBlob's JPEG/PNG in idle time between frames, and
+ * with no frames it waits 1 s before encoding anyway. Android's WebView draws only when the screen does, and a
+ * still variable-refresh screen (e.g. Galaxy S23) barely does, so every page waited 1 s+ unless the user swiped.
+ * toDataURL encodes right away (same encoder, same bytes); the base64 round trip costs a few ms.
+ */
+function canvasToBytes(c: HTMLCanvasElement, type: string, q?: number): Uint8Array {
+  const url = c.toDataURL(type, q);
+  const comma = url.indexOf(',');
+  if (comma < 0 || !url.startsWith(`data:${type}`)) throw new Error('Canvas encode failed (page too large for this device?)');
+  const bin = atob(url.slice(comma + 1));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 /**
@@ -301,6 +308,7 @@ export async function exportRedacted(
     const canvas = document.createElement('canvas');
     try {
       await renderToCanvas(page, canvas, scale);
+      const tRender = performance.now() - tp;
       const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true })!;
       ctx.fillStyle = '#000';
       const boxesPx = (redactions[i - 1] ?? []).map((r) => toPixels(r, scale));
@@ -355,7 +363,9 @@ export async function exportRedacted(
       onProgress(`Compressing page ${i}/${n}`, (i - 0.5) / n);
       const p = out.addPage([base.width, base.height]);
       // Lossless is written as raw Flate (native, fast), avoiding pdf-lib's pure-JS PNG decode.
+      const te = performance.now();
       const enc = await encodePage(canvas, opts);
+      const tEnc = performance.now() - te;
       if ('flate' in enc) {
         const dict = out.context.obj({
           Type: 'XObject', Subtype: 'Image', Width: canvas.width, Height: canvas.height,
@@ -380,7 +390,8 @@ export async function exportRedacted(
         addTextLayer(p, latinFont(font, fontName), unicode, words, boxesPx, canvas.width, canvas.height, base.width, base.height);
         ocrWords += words.length;
       }
-      lastOcrStats.log.push(`export page ${i}: ${Math.round(performance.now() - tp)} ms, text ${how} ${Math.round(tText)} ms, ${canvas.width}x${canvas.height}`);
+      lastOcrStats.log.push(`export page ${i}: ${Math.round(performance.now() - tp)} ms (draw ${Math.round(tRender)}, `
+        + `text ${how} ${Math.round(tText)}, encode ${'flate' in enc ? 'lossless' : 'jpeg'} ${Math.round(tEnc)}), ${canvas.width}x${canvas.height}`);
     } finally {
       canvas.width = canvas.height = 0; // release GPU/heap memory early
       page.cleanup();
@@ -390,5 +401,8 @@ export async function exportRedacted(
   out.setProducer('Umbra PDF');
   out.setCreator('Umbra PDF');
   onProgress('Writing PDF', 1);
-  return { bytes: await out.save({ useObjectStreams: true }), downscaled, ocrWords };
+  const ts = performance.now();
+  const bytes = await out.save({ useObjectStreams: true });
+  lastOcrStats.log.push(`export write PDF: ${Math.round(performance.now() - ts)} ms`);
+  return { bytes, downscaled, ocrWords };
 }
