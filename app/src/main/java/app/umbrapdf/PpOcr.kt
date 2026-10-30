@@ -404,7 +404,11 @@ class PpOcr(private val load: (String) -> ByteArray) {
         const val OCR_PRIORITY = 4
 
         /** A thread at [OCR_PRIORITY]. ONNX Runtime's own threads, started from one, inherit it. */
-        fun ocrThread(r: Runnable, name: String) = Thread({ android.os.Process.setThreadPriority(OCR_PRIORITY); r.run() }, name)
+        fun ocrThread(r: Runnable, name: String) = Thread({
+            // Off a device (JVM unit tests) the Android call isn't there: run at normal priority rather than not at all.
+            try { android.os.Process.setThreadPriority(OCR_PRIORITY) } catch (_: Throwable) { }
+            r.run()
+        }, name)
 
         private const val BATCH = 4 // lines per recognition run
         /** Space weight in a gap between two characters above which a space is written (the space is the last class). */
