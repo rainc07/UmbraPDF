@@ -42,6 +42,8 @@ jobs:
             echo "::warning::app/src/main/assets/web differs from a fresh build. Run 'npm run build:android' and commit."
             git diff --stat -- app/src/main/assets/web
           fi
+      - name: Chinese font for the Chinese OCR test
+        run: sudo apt-get install -y --no-install-recommends fonts-wqy-zenhei
       - name: E2E + UI tests
         working-directory: core
         run: |

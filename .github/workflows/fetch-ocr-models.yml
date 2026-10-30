@@ -31,7 +31,23 @@ jobs:
             4e16deb22c4da6468bdca539b2cd3c8687825538b67109177c47d359ab994cd7
           curl -fsSL --retry 3 -o "$d/dict_en.txt" https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/dict.txt
           curl -fsSL --retry 3 -o "$d/rec_en.config.json" https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/english/config.json
+          # Text recognition: PP-OCRv5_mobile_rec (Simplified + Traditional Chinese, English, digits) + its dictionary, Apache-2.0
+          get rec_ch.onnx https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_rec.onnx \
+            243a0f06d826761323e9045e9b113ab2c191c3aa50565585e628300b8eda0224
+          curl -fsSL --retry 3 -o "$d/dict_ch.txt" https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/chinese/dict.txt
           sha256sum "$d"/*
+          # Each dictionary must match its model's classes (blank + characters + space).
+          pip install -q onnx==1.17.0
+          python3 - "$d" <<'PY'
+          import onnx, sys
+          d = sys.argv[1]
+          for lang in ('en', 'ch'):
+              m = onnx.load(f'{d}/rec_{lang}.onnx')
+              n = m.graph.output[0].type.tensor_type.shape.dim[-1].dim_value
+              k = sum(1 for l in open(f'{d}/dict_{lang}.txt', encoding='utf-8').read().split('\n') if l != '')
+              print(lang, 'classes', n, 'dict', k)
+              assert n == k + 2, f'{lang}: model has {n} classes, dict has {k} lines'
+          PY
           ls -la "$d"
       - name: Commit
         run: |

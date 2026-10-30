@@ -8,6 +8,7 @@ import {
   type Hit, type SearchPattern, type CustomPattern, type SplitSpec, type SplitPart,
 } from './engine';
 import { lastOcrStats, resetOcrStats, setOcrEngine, warmUpOcr } from './engine/ocr';
+import { setOcrLang, type OcrLang } from './engine/ppocr';
 import { abortable, isAbort } from './engine/search';
 import { detectHost, type OpenedFile } from './platform/host';
 import { NativeReader } from './platform/nativeRead';
@@ -563,7 +564,7 @@ type ThemePref = 'system' | 'light' | 'dark';
 interface ExportPrefs { dpi: number; compression: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
 interface Options { hideRecents: boolean; platesLabelled: boolean; confirmLeave: boolean; closeAfterRedact: boolean; reviewReminder: boolean }
 const DEFAULT_OPTIONS: Options = { hideRecents: true, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
-interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[]; always: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
+interface Prefs { theme: ThemePref; advanced: boolean; ocrLang: OcrLang; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[]; always: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
 /** Landscape side panel: which side, and its width in % of the screen (20–45). */
 interface UiPrefs { panelSide: 'left' | 'right'; panelW: number }
 const clampPanelW = (w: number) => Math.min(45, Math.max(20, Math.round(w)));
@@ -584,7 +585,7 @@ function cleanAlways(v: unknown): string[] {
 }
 function loadPrefs(): Prefs {
   const d: Prefs = {
-    theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id), always: [] },
+    theme: 'system', advanced: false, ocrLang: 'en', detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id), always: [] },
     export: { dpi: DEFAULT_EXPORT.dpi, compression: DEFAULT_EXPORT.format, searchable: true, method: 'vector' },
     opts: { ...DEFAULT_OPTIONS },
     ui: { panelSide: 'right', panelW: 34 },
@@ -595,6 +596,7 @@ function loadPrefs(): Prefs {
     return {
       theme: v.theme === 'light' || v.theme === 'dark' ? v.theme : 'system',
       advanced: v.advanced === true,
+      ocrLang: v.ocrLang === 'ch' ? 'ch' : 'en',
       opts: (() => {
         const raw = (v.opts ?? {}) as unknown as Record<string, unknown>;
         const o = { ...DEFAULT_OPTIONS };
@@ -633,6 +635,7 @@ host.onInsets((i) => {
 });
 applyTheme();
 host.setSecure(prefs.opts.hideRecents);
+setOcrLang(prefs.ocrLang);
 
 const OPTION_ROWS: [keyof Options, string, string][] = [
   ['closeAfterRedact', 'Close Auto Detect after Redact', 'Go straight back to the document. Reopen Auto Detect to review or undo items in its Redacted tab. Find always stays open.'],
@@ -645,12 +648,16 @@ const OPTION_ROWS: [keyof Options, string, string][] = [
 function settingsDialog() {
   if (S.busy) return;
   const seg = (v: ThemePref, l: string) => `<button data-theme-opt="${v}" aria-pressed="${prefs.theme === v}">${l}</button>`;
+  const langSeg = (v: OcrLang, l: string) => `<button data-lang-opt="${v}" aria-pressed="${prefs.ocrLang === v}">${l}</button>`;
   modal(`<h2>Settings</h2>
     <h3>Appearance</h3>
     <div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div>
     <h3>Preferences</h3>
     ${OPTION_ROWS.filter(([k]) => k !== 'hideRecents' || host.name === 'android').map(([k, t, h]) => `<label class="row2"><span>${t}<small class="hint">${h}</small></span>
       <input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}></label>`).join('')}
+    <h3>Text in scans</h3>
+    <div class="segctl">${langSeg('en', 'English')}${langSeg('ch', 'English + 中文')}</div>
+    <p class="hint" id="s-lang-hint"></p>
     <h3>Always redact</h3>
     <p class="hint">Names, places or other words Auto Detect should always find, in any case and across line breaks. Kept on this device only.</p>
     <form class="prow" id="s-aw-form"><input id="s-aw" placeholder="Word or phrase, e.g. Tan Ah Kow" autocomplete="off" spellcheck="false" maxlength="200" enterkeyhint="done">
@@ -666,6 +673,18 @@ function settingsDialog() {
     b.onclick = () => {
       prefs.theme = b.dataset.themeOpt as ThemePref; savePrefs(); applyTheme();
       $('#sheet').querySelectorAll('[data-theme-opt]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+    };
+  });
+  const langHint = () => {
+    $('#s-lang-hint').textContent = prefs.ocrLang === 'ch'
+      ? 'Reads Simplified and Traditional Chinese as well as English. Scanned pages take a little longer to read.'
+      : 'Reads English and Malay. Choose English + 中文 for scans with Chinese text.';
+  };
+  langHint();
+  $('#sheet').querySelectorAll<HTMLButtonElement>('[data-lang-opt]').forEach((b) => {
+    b.onclick = () => {
+      prefs.ocrLang = b.dataset.langOpt as OcrLang; savePrefs(); setOcrLang(prefs.ocrLang); langHint();
+      $('#sheet').querySelectorAll('[data-lang-opt]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
     };
   });
   const aw = prefs.detect;
@@ -1686,6 +1705,7 @@ syncToolbar();
   ocrStats: () => ({ ...lastOcrStats, log: [...lastOcrStats.log] }),
   resetOcrStats: () => resetOcrStats(),
   setOcrEngine: (e: 'paddle' | 'tesseract') => setOcrEngine(e),
+  setOcrLang: (l: OcrLang) => setOcrLang(l),
   fitZoom: () => fitZoom(),
   pointAt: (cx: number, cy: number) => pointAt(cx, cy),
   setMode: (m: 'draw' | 'pan') => { S.mode = m; syncToolbar(); },

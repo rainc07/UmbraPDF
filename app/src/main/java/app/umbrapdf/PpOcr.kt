@@ -20,7 +20,7 @@ import kotlin.math.sin
  * Same models and the same steps as the web engine (core/src/engine/ppocr.worker.ts), which this mirrors:
  * DB text detection -> one strip per line (height 48) -> CTC recognition with character positions.
  * Input: RGBA pixels; output: JSON lines with corners in reading order (pixels), text, confidence, char spans.
- * `load` returns a model file's bytes by name (det.onnx, rec_en.onnx, dict_en.txt).
+ * `load` returns a model file's bytes by name (det.onnx, rec_en.onnx, dict_en.txt; rec_ch.onnx, dict_ch.txt).
  */
 class PpOcr(private val load: (String) -> ByteArray) {
     // Created on first use (on the OCR thread), so a problem loading the native runtime can't stop the app from opening.
@@ -28,6 +28,10 @@ class PpOcr(private val load: (String) -> ByteArray) {
     private var det: OrtSession? = null
     private var rec: OrtSession? = null
     private var chars: List<String> = emptyList()
+    /** Recognition model: "en" (English) or "ch" (Simplified + Traditional Chinese, and English). Applies from the next read. */
+    @Volatile var lang = "en"
+        set(v) { field = if (v == "ch") "ch" else "en" }
+    private var recLang: String? = null
     /** Threads for one detection run, and recognition runs side by side: the fast cores (big.LITTLE phones), at most 4 / 6. */
     private val fast = fastCores()
     val threads = max(1, min(4, fast))
@@ -35,14 +39,19 @@ class PpOcr(private val load: (String) -> ByteArray) {
 
     @Synchronized
     fun ensureLoaded(): Long {
-        if (det != null) return 0
+        val l = lang
+        if (det != null && recLang == l) return 0
         val t0 = System.nanoTime()
-        // Detection: one big image, so its operators are split over the cores. No spinning once it's done, so
-        // its threads don't hold cores while the lines are read.
-        val detOpts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(threads)
-            addConfigEntry("session.intra_op.allow_spinning", "0")
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        fun asset(n: String) = load(n)
+        if (det == null) {
+            // Detection: one big image, so its operators are split over the cores. No spinning once it's done, so
+            // its threads don't hold cores while the lines are read.
+            val detOpts = OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(threads)
+                addConfigEntry("session.intra_op.allow_spinning", "0")
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            }
+            det = env.createSession(asset("det.onnx"), detOpts)
         }
         // Recognition: many small strips, so each batch runs on one core and the batches run side by side
         // (splitting one small strip's operators over 4 cores mostly waits on the other cores).
@@ -51,12 +60,13 @@ class PpOcr(private val load: (String) -> ByteArray) {
             // Not ALL_OPT: its blocked memory layout (x86) spent a fifth of the time converting between layouts here.
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.EXTENDED_OPT)
         }
-        fun asset(n: String) = load(n)
-        det = env.createSession(asset("det.onnx"), detOpts)
-        rec = env.createSession(asset("rec_en.onnx"), recOpts)
-        val lines = String(asset("dict_en.txt"), Charsets.UTF_8).split("\n").map { it.trimEnd('\r') }.toMutableList()
+        // Only one recognition model is kept loaded (the Chinese one is about 16 MB).
+        rec?.close(); rec = null; recLang = null
+        rec = env.createSession(asset("rec_$l.onnx"), recOpts)
+        val lines = String(asset("dict_$l.txt"), Charsets.UTF_8).split("\n").map { it.trimEnd('\r') }.toMutableList()
         if (lines.isNotEmpty() && lines.last().isEmpty()) lines.removeAt(lines.size - 1)
         chars = lines + " "
+        recLang = l
         return (System.nanoTime() - t0) / 1_000_000
     }
 
@@ -227,10 +237,13 @@ class PpOcr(private val load: (String) -> ByteArray) {
     private fun recognise(strips: List<FloatArray>, widths: IntArray): Array<Rec> {
         val res = arrayOfNulls<Rec>(strips.size)
         val order = strips.indices.sortedBy { widths[it] }
+        // One line per run with the Chinese model: its output has 18,385 classes per step (about 20 MB per
+        // line), and batches of it ran 1.7x slower (desktop measurement).
+        val most = if (chars.size > 1000) 1 else BATCH
         val batches = ArrayList<MutableList<Int>>()
         for (i in order) {
             val b = batches.lastOrNull()
-            if (b != null && b.size < BATCH && widths[i] <= 1.15f * widths[b[0]]) b.add(i) else batches.add(mutableListOf(i))
+            if (b != null && b.size < most && widths[i] <= 1.15f * widths[b[0]]) b.add(i) else batches.add(mutableListOf(i))
         }
         // Widest batches first, so the last ones to finish are short.
         batches.sortByDescending { idx -> idx.size * widths[idx.last()] }
@@ -254,21 +267,30 @@ class PpOcr(private val load: (String) -> ByteArray) {
                 val fb = ot.floatBuffer; val p = FloatArray(fb.remaining()).also { fb.get(it) }
                 idx.forEachIndexed { b, i ->
                     val used = widths[i].toFloat() / maxW * T
-                    var prev = 0; val sb = StringBuilder(); var confSum = 0f
+                    var prev = 0; val sb = StringBuilder(); var confSum = 0f; var n = 0; var gap = 0f; var gap0 = 0
                     val cs = ArrayList<Triple<String, Float, Float>>()
                     for (tt in 0 until T) {
                         var best = 0; var bv = -1f; val o = (b * T + tt) * C
                         for (c in 0 until C) if (p[o + c] > bv) { bv = p[o + c]; best = c }
                         if (best != 0 && best != prev) {
                             val ch = chars.getOrElse(best - 1) { "" }
-                            sb.append(ch); confSum += bv
+                            // The Chinese model often leaves out the space between English words, but still gives
+                            // it some weight in the gap: a likely space there is written (as ppocr.pipeline.ts).
+                            if (gap >= SPACE_IN_GAP && ch != " " && cs.isNotEmpty() && cs.last().first != " ") {
+                                sb.append(' '); cs.add(Triple(" ", min(1f, gap0 / used), min(1f, tt / used)))
+                            }
+                            sb.append(ch); confSum += bv; n++
                             cs.add(Triple(ch, min(1f, tt / used), min(1f, (tt + 1) / used)))
+                            gap = 0f
                         } else if (best != 0 && best == prev && cs.isNotEmpty()) {
                             val l = cs.removeAt(cs.size - 1); cs.add(Triple(l.first, l.second, min(1f, (tt + 1) / used)))
+                        } else if (best == 0) {
+                            if (prev != 0) gap0 = tt
+                            gap = max(gap, p[o + C - 1])
                         }
                         prev = best
                     }
-                    res[i] = Rec(sb.toString(), if (cs.isEmpty()) 0f else confSum / cs.size, cs)
+                    res[i] = Rec(sb.toString(), if (n == 0) 0f else confSum / n, cs)
                 }
             }
         }
@@ -371,10 +393,12 @@ class PpOcr(private val load: (String) -> ByteArray) {
         return sb.append('"').toString()
     }
 
-    fun close() { det?.close(); rec?.close(); det = null; rec = null }
+    fun close() { det?.close(); rec?.close(); det = null; rec = null; recLang = null }
 
     companion object {
         private const val BATCH = 4 // lines per recognition run
+        /** Space weight in a gap between two characters above which a space is written (the space is the last class). */
+        private const val SPACE_IN_GAP = 0.05f
 
         /** Cores within 70% of the fastest core's top speed (all of them if the speeds can't be read). */
         fun fastCores(): Int {
