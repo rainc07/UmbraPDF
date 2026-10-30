@@ -347,6 +347,20 @@ const imgHidden = await page.evaluate(() => document.querySelector('#x-image-opt
   const steps = hs.slice(1).map((h, i) => Math.abs(h - hs[i])).filter((x) => x > 0.05);
   check(steps.length >= 4 && Math.max(...steps.slice(-2)) <= 4, `motion: Image settings slide open with no jump at the end (last steps ${steps.slice(-3).map((x) => x.toFixed(1)).join(', ')})`);
 }
+{
+  // ...and close without one: what's below (Always redact's Add) glides to where it stays.
+  const ys = await page.evaluate(async () => {
+    const el = document.querySelector('#s-aw-form button'), at = () => el.getBoundingClientRect().top;
+    document.querySelector('#x-method [data-m="vector"]').click();
+    const out = []; const t0 = performance.now();
+    await new Promise((r) => { const f = () => { out.push(at()); performance.now() - t0 < 500 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
+    document.querySelector('#x-method [data-m="image"]').click();
+    await new Promise((r) => setTimeout(r, 400));
+    return out;
+  });
+  const steps = ys.slice(1).map((y, i) => Math.abs(y - ys[i])).filter((x) => x > 0.05);
+  check(steps.length >= 4 && Math.max(...steps.slice(-2)) <= 4, `motion: Image settings close with no jump at the end (last steps ${steps.slice(-3).map((x) => x.toFixed(1)).join(', ')})`);
+}
 await page.selectOption('#x-dpi', '150');
 await page.click('#s-close'); await page.waitForTimeout(250);
 await page.reload();

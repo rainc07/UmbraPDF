@@ -697,7 +697,10 @@ const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 const EASE = 'cubic-bezier(.2, .8, .2, 1)';
 /** Its children's margins stay inside it, so its height while animating is the height it ends with (no jump at the end). */
 function contain(el: HTMLElement) {
-  if (!el.hidden && !el.classList.contains('contain') && getComputedStyle(el).display === 'block') el.classList.add('contain');
+  for (const e of [el, el.parentElement]) {
+    // The parent too: otherwise a margin next to `el` overlaps the parent's own once `el` is gone, but not while it shrinks.
+    if (e && !e.hidden && !e.classList.contains('contain') && getComputedStyle(e).display === 'block') e.classList.add('contain');
+  }
 }
 /**
  * Bottom margin for a slid-away box: gone, the margins above and below it overlap (collapse) into the larger
@@ -725,6 +728,7 @@ function slide(el: HTMLElement, show: boolean, instant = false) {
   if ((el.dataset.slide ?? String(!el.hidden)) === String(show)) return;
   el.dataset.slide = String(show);
   el.getAnimations?.().forEach((a) => a.cancel());
+  contain(el);
   if (instant || reduceMotion?.matches || !el.animate) { el.hidden = !show; contain(el); return; }
   el.hidden = false;
   contain(el);

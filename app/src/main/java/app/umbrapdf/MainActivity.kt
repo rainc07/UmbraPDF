@@ -95,7 +95,7 @@ class MainActivity : ComponentActivity() {
 
     // ---- Native OCR (PaddleOCR on ONNX Runtime), reached from JS as window.UmbraOcr (WebMessageListener) ----
     private lateinit var ocr: PpOcr
-    private val ocrExec = Executors.newSingleThreadExecutor()
+    private val ocrExec = Executors.newSingleThreadExecutor { r -> PpOcr.ocrThread(r, "umbra-ocr") }
     @Volatile var nativeOcr = false
         private set
     @Volatile var nativeOcrBinary = false
