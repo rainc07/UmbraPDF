@@ -78,7 +78,7 @@ jobs:
         shell: pwsh
         run: |
           $dir = "$env:LOCALAPPDATA\Programs\Umbra PDF"
-          Start-Process -Wait ".\UmbraPDF-Web-Setup-${{ steps.v.outputs.version }}.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          Start-Process -Wait ".\UmbraPDF-${{ steps.v.outputs.version }}-Windows-Setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
           if (-not (Test-Path "$dir\Umbra PDF.cmd")) { throw "not installed in $dir" }
           node ..\package\smoke.mjs "$dir"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -90,17 +90,18 @@ jobs:
         run: |
           v=${{ steps.v.outputs.version }}
           if [ "${{ runner.os }}" = Windows ]; then
-            mv UmbraPDF-Web-win-x64 "UmbraPDF-Web-$v-win-x64"
-            7z a -tzip -mx=9 -bd "UmbraPDF-Web-$v-win-x64.zip" "UmbraPDF-Web-$v-win-x64" > /dev/null
+            mv UmbraPDF-Web-win-x64 "UmbraPDF-$v-Windows-Portable"
+            7z a -tzip -mx=9 -bd "UmbraPDF-$v-Windows-Portable.zip" "UmbraPDF-$v-Windows-Portable" > /dev/null
+            rm -rf "UmbraPDF-$v-Windows-Portable"
           else
-            mv UmbraPDF-Web-linux-x64 "UmbraPDF-Web-$v-linux-x64"
-            tar -czf "UmbraPDF-Web-$v-linux-x64.tar.gz" "UmbraPDF-Web-$v-linux-x64"
+            mv UmbraPDF-Web-linux-x64 "UmbraPDF-$v-Linux"
+            tar -czf "UmbraPDF-$v-Linux.tar.gz" "UmbraPDF-$v-Linux"
+            rm -rf "UmbraPDF-$v-Linux"
           fi
-          rm -rf "UmbraPDF-Web-$v-${{ matrix.target }}"
-          sha256sum UmbraPDF-Web-* | tee SHA256SUMS-${{ matrix.target }}.txt
+          sha256sum UmbraPDF-* | tee SHA256SUMS-${{ matrix.target }}.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: UmbraPDF-Web-${{ steps.v.outputs.version }}-${{ matrix.target }}
+          name: UmbraPDF-${{ steps.v.outputs.version }}-${{ matrix.target }}
           path: web/release/
           retention-days: 14
       - name: Attach to release
@@ -108,4 +109,24 @@ jobs:
         working-directory: web/release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" UmbraPDF-Web-* SHA256SUMS-* --clobber
+        run: gh release upload "$GITHUB_REF_NAME" UmbraPDF-* SHA256SUMS-* --clobber
+
+  # Adds "Which file do I download?" to the release notes, once, after the packages are attached.
+  install-notes:
+    name: Install steps in release notes
+    if: github.event_name == 'release'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release edit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add install section
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json body --jq .body > notes.md
+          if grep -q 'umbra-install-steps' notes.md; then echo "already there"; exit 0; fi
+          { echo; echo '<!-- umbra-install-steps -->'; sed "s/{version}/${GITHUB_REF_NAME#v}/g" .github/release-install.md; } >> notes.md
+          gh release edit "$GITHUB_REF_NAME" --notes-file notes.md

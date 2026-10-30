@@ -2,6 +2,19 @@
 
 Offline PDF redaction. Draw boxes over sensitive content (or let Umbra find personal details), then export either a **true redaction that keeps the original text** or a **flattened, image-only PDF**. Every export gets an automatic, fail-closed safety check. Source code is GPL-3.0-or-later. The app bundles MuPDF (AGPL-3.0-or-later); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+## Install
+Download from the **[latest release](https://github.com/rainc07/UmbraPDF/releases/latest)** (under *Assets*):
+
+| Your device | Download | Then |
+|---|---|---|
+| **Android** | `UmbraPDF-<version>.apk` | Open it and tap **Install**. If Play Protect warns, tap **More details → Install anyway**. |
+| **Windows** 10/11 | `UmbraPDF-<version>-Windows-Setup.exe` | Run it. If SmartScreen warns, click **More info → Run anyway**. Start **Umbra PDF** from the Start menu; it opens in your browser. |
+| Windows, no install | `UmbraPDF-<version>-Windows-Portable.zip` | Unzip and double-click **Umbra PDF.cmd**. |
+| **Linux** (x64) | `UmbraPDF-<version>-Linux.tar.gz` | Unpack and run `./umbra-pdf.sh`. |
+
+Nothing else is needed (no Node.js, no git). Everything runs on your own device; the Windows/Linux version only answers
+this computer (`127.0.0.1`).
+
 ## Features
 - **Manual redaction**: draw, select, delete, undo; pinch-zoom and double-tap zoom.
 - **Find & black out**: search across all pages (match case, whole word). Scanned pages are OCR'd on the device first.
@@ -62,11 +75,10 @@ npm run dev             # browser dev server
 The same app in your browser, served from your own computer only (127.0.0.1). Text in scanned pages is read by
 ONNX Runtime for Node: the same PaddleOCR models and steps as Android, natively and multi-threaded.
 
-**Install (no Node.js or git needed):** each release has `UmbraPDF-Web-Setup-<version>.exe` (Windows; per user, no
-admin prompt, Start menu shortcut, uninstaller), a portable Windows `.zip` and a Linux `.tar.gz`. All three carry their
-own Node.js runtime. The installer isn't code-signed yet, so SmartScreen asks once: *More info → Run anyway*.
-Settings (port, threads, GPU) are in `settings.json` in the install folder. If the port is taken by another program,
-Umbra PDF moves to the next free one (5181, 5182, ...).
+**Install:** see [Install](#install). The installer is per user (no admin prompt) with a Start menu shortcut and an
+uninstaller; it isn't code-signed yet. Settings (port, threads, GPU) are in `settings.json` in the install folder
+(Start menu → *Umbra PDF settings*). If the port is taken by another program, Umbra PDF moves to the next free one
+(5181, 5182, ...).
 
 Build the packages yourself: `cd web && npm ci && npm run build:core && npm run build && node package/build.mjs`, then
 `iscc package/umbra-web.iss` ([Inno Setup](https://jrsoftware.org/isinfo.php)) for the installer. CI does this in
