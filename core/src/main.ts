@@ -1254,7 +1254,7 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
   const lap = (name: string) => { const t = performance.now(); timings.push([name, t - t0]); t0 = t; };
   const res = method === 'vector'
     ? { bytes: await exportVector(S.bytes!, S.password, S.boxes, onProgress), downscaled: [], ocrWords: 0 }
-    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr' })) : undefined);
+    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr', scanWords: pt.scanWords })) : undefined);
   lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
   const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
   lap('Structure check');
