@@ -350,6 +350,60 @@ check(imgHidden && xp.method === 'image' && xp.dpi === 150, `export defaults: sa
   await T('reset');
 }
 
+// Settings search: only matching settings stay; descriptions sit behind (?).
+await page.setViewportSize({ width: 412, height: 860 });
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+const visibleHints = await page.evaluate(() => [...document.querySelectorAll('#sheet .row2 small.hint')].length);
+check(visibleHints === 0, `settings: row descriptions are behind (?), none shown inline (${visibleHints})`);
+await page.fill('#s-search', 'dark'); await page.waitForTimeout(400);
+const srch = await page.evaluate(() => [...document.querySelectorAll('#sheet .sset')].filter((x) => !x.hidden).map((x) => x.querySelector('h3').textContent.trim()));
+check(JSON.stringify(srch) === '["Appearance"]', `settings search "dark" keeps only Appearance (${srch})`);
+await page.fill('#s-search', 'screenshots'); await page.waitForTimeout(400);
+const srch2 = await page.evaluate(() => [...document.querySelectorAll('#sheet .sitem')].filter((x) => !x.hidden && !x.closest('.sset').hidden).length);
+await page.fill('#s-search', 'zzzz'); await page.waitForTimeout(400);
+const none = await page.evaluate(() => !document.querySelector('#s-none').hidden);
+await page.fill('#s-search', ''); await page.waitForTimeout(400);
+const back = await page.evaluate(() => [...document.querySelectorAll('#sheet .sset')].every((x) => !x.hidden));
+check(srch2 <= 1 && none && back, `settings search: help text matches, "no match" shown, clearing brings everything back (${srch2}, ${none}, ${back})`);
+// Fluid toggles: drag the theme highlight from System to Dark and let go; drag a switch's thumb.
+{
+  const bx = await page.evaluate(() => { const b = document.querySelectorAll('[data-theme-opt]'); const r = (e) => { const q = e.getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; }; return [r(b[0]), r(b[2])]; });
+  await page.mouse.move(...bx[0]); await page.mouse.down(); await page.mouse.move(bx[0][0] + 40, bx[0][1], { steps: 4 }); await page.mouse.move(bx[1][0] - 10, bx[1][1], { steps: 6 }); await page.mouse.up();
+  await page.waitForTimeout(300);
+  const th = await page.evaluate(() => document.querySelector('[data-theme-opt="dark"]').getAttribute('aria-pressed'));
+  const sw = await page.evaluate(() => { const e = document.querySelector('#s-adv'); e.scrollIntoView({ block: 'center' }); const q = e.getBoundingClientRect(); return [q.x + 6, q.y + q.height / 2, e.checked]; });
+  await page.mouse.move(sw[0], sw[1]); await page.mouse.down(); await page.mouse.move(sw[0] + 30, sw[1], { steps: 5 }); await page.mouse.up();
+  await page.waitForTimeout(200);
+  const sw2 = await page.evaluate(() => document.querySelector('#s-adv').checked);
+  check(th === 'true' && sw[2] === false && sw2 === true, `fluid toggles: dragging picks Dark, dragging a switch turns it on (${th}, ${sw2})`);
+  await page.evaluate(() => { document.querySelector('[data-theme-opt="system"]').click(); const e = document.querySelector('#s-adv'); if (e.checked) e.click(); });
+}
+await page.click('#s-close'); await page.waitForTimeout(250);
+// Auto Detect panel: title bar above the list, drag to full and to collapsed.
+{
+  const d5 = await PDFDocument.create(); const f5 = await d5.embedFont(StandardFonts.Helvetica);
+  const p5 = d5.addPage([612, 792]); for (let j = 0; j < 14; j++) p5.drawText(`Mail user${j}@example.com`, { x: 50, y: 740 - j * 30, size: 12, font: f5 });
+  await page.evaluate(async (a) => { await window.__umbraTest.load(new Uint8Array(a)); }, Array.from(await d5.save()));
+  await page.waitForTimeout(500);
+  await page.evaluate(() => document.querySelector('#btn-detect').click()); await page.waitForTimeout(400);
+  const st = await page.evaluate(() => { const p = document.querySelector('#panel'); return [p.dataset.snap, Math.round(p.offsetHeight / document.querySelector('.stage').clientHeight * 100), !!p.querySelector('.phead > .ph')]; });
+  const g = await page.evaluate(() => { const q = document.querySelector('#p-grab').getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; });
+  await page.mouse.move(...g); await page.mouse.down(); await page.mouse.move(g[0], 40, { steps: 8 }); await page.mouse.up(); await page.waitForTimeout(450);
+  const full = await page.evaluate(() => [document.querySelector('#panel').dataset.snap, document.querySelector('#panel').offsetHeight === document.querySelector('.stage').clientHeight]);
+  const g2 = await page.evaluate(() => { const q = document.querySelector('#p-grab').getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; });
+  await page.mouse.move(...g2); await page.mouse.down(); await page.mouse.move(g2[0], 900, { steps: 8 }); await page.mouse.up(); await page.waitForTimeout(450);
+  const peek = await page.evaluate(() => document.querySelector('#panel').dataset.snap);
+  const tb = await page.evaluate(() => { const q = document.querySelector('#panel .ph b').getBoundingClientRect(); return [q.x + 10, q.y + q.height / 2]; });
+  await page.mouse.click(...tb); await page.waitForTimeout(450);
+  const half = await page.evaluate(() => document.querySelector('#panel').dataset.snap);
+  check(st[0] === 'half' && st[1] >= 38 && st[1] <= 42 && st[2] && full[0] === 'full' && full[1] && peek === 'peek' && half === 'half',
+    `panel: opens at 40% with the title bar above the list, drags to full and collapsed, tap brings it back (${st}, ${full}, ${peek}, ${half})`);
+  await page.evaluate(() => document.querySelector('#p-close').click()); await page.waitForTimeout(300);
+  await T('reset');
+}
+
 check(errors.length === 0, `no page errors ${errors.join(' | ')}`);
 await browser.close(); server.close();
 console.log(failed ? `\n${failed} CHECK(S) FAILED` : '\nALL UI CHECKS PASSED');
