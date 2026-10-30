@@ -70,7 +70,7 @@ let measureCtx: CanvasRenderingContext2D | null = null;
 /** PDF glyph positions already include any kerning (TJ), so measure without kerning/ligatures. */
 function ctx2d(): CanvasRenderingContext2D {
   if (measureCtx) return measureCtx;
-  const c = document.createElement('canvas').getContext('2d')!;
+  const c = document.createElement('canvas').getContext('2d', { willReadFrequently: true })!;
   const x = c as CanvasRenderingContext2D & { fontKerning?: string; textRendering?: string };
   x.fontKerning = 'none';
   x.textRendering = 'optimizeSpeed';
@@ -321,7 +321,7 @@ async function addImageText(page: PDFPageProxy, t: PageText, dpi: number, onStat
       onStatus(`OCR: picture ${k + 1}/${regions.length}`);
       const crop = document.createElement('canvas');
       crop.width = Math.max(8, Math.round(r.w * scale)); crop.height = Math.max(8, Math.round(r.h * scale));
-      crop.getContext('2d')!.drawImage(full, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 0, 0, crop.width, crop.height);
+      crop.getContext('2d', { willReadFrequently: true })!.drawImage(full, r.x * scale, r.y * scale, r.w * scale, r.h * scale, 0, 0, crop.width, crop.height);
       try {
         const words = await recognizeWordsRobust(crop, onStatus);
         if (words.length) { b.sep('\n'); pushWords(b, words, scale, { x: r.x, y: r.y }, groupBase + k * 10000, onText); }

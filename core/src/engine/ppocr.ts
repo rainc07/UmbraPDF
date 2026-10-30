@@ -283,7 +283,7 @@ export async function ppocrPage(
   const blanked = (regions: Quad[]) => {
     if (!regions.length) return canvas;
     const src = document.createElement('canvas'); src.width = W; src.height = H;
-    const g = src.getContext('2d')!;
+    const g = src.getContext('2d', { willReadFrequently: true })!;
     g.drawImage(canvas, 0, 0); g.fillStyle = '#fff';
     for (const q of regions) {
       const [cx, cy] = centre(q);
@@ -296,7 +296,7 @@ export async function ppocrPage(
   const readBlock = async (src: HTMLCanvasElement, ink: ReturnType<typeof inkIslands>[number]): Promise<Block> => {
     const part = document.createElement('canvas');
     part.width = ink.w; part.height = ink.h;
-    part.getContext('2d')!.drawImage(src, ink.x0, ink.y0, ink.w, ink.h, 0, 0, ink.w, ink.h);
+    part.getContext('2d', { willReadFrequently: true })!.drawImage(src, ink.x0, ink.y0, ink.w, ink.h, 0, 0, ink.w, ink.h);
     try {
       const lines = await readLines(part, Math.min(PAGE_LIMIT, Math.max(ink.w, ink.h)));
       const sh = (b: { x0: number; y0: number; x1: number; y1: number }) => ({ x0: b.x0 + ink.x0, y0: b.y0 + ink.y0, x1: b.x1 + ink.x0, y1: b.y1 + ink.y0 });

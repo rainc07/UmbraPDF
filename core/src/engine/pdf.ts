@@ -69,7 +69,10 @@ export async function renderToCanvas(page: PDFPageProxy, canvas: HTMLCanvasEleme
   const vp = page.getViewport({ scale });
   canvas.width = Math.max(1, Math.ceil(vp.width));
   canvas.height = Math.max(1, Math.ceil(vp.height));
-  const ctx = canvas.getContext('2d', { alpha: false })!;
+  // A CPU (software) canvas: every page we render is read back (encode, OCR, checks). In Android's WebView a GPU
+  // canvas only does its work when the app draws a frame, so a still screen (1-10 Hz) stalled exports until the
+  // user swiped. The other offscreen canvases in the engine are CPU canvases for the same reason.
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true })!;
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const task = page.render({ canvasContext: ctx, canvas, viewport: vp, annotationMode: AnnotationMode.ENABLE });
