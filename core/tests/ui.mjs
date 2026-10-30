@@ -275,9 +275,28 @@ const awUi = await page.evaluate(() => [...document.querySelectorAll('#s-aw-list
 check(JSON.stringify(awUi) === '["Tan Ah Kow","Ali"]', `always redact: added, tidied, duplicates and blanks skipped (${JSON.stringify(awUi)})`);
 await page.fill('#s-aw', 'Remove Me'); await page.press('#s-aw', 'Enter');
 await page.click('#s-aw-list [data-rmaw="2"]');
+// Settings → Text in scans: one switch per language, English on by default, the last one can't be switched off.
+const langs = () => page.evaluate(() => [...document.querySelectorAll('[data-lang]')].map((x) => `${x.dataset.lang}:${x.checked}`).join(' '));
+check(await langs() === 'en:true zh:false', `text in scans: English on, 中文 off by default (${await langs()})`);
+await page.click('[data-lang="en"]'); await page.waitForTimeout(100);
+check(await langs() === 'en:true zh:false' && await page.isVisible('#s-lang-hint'), `text in scans: the last language stays on (${await langs()})`);
+await page.click('[data-lang="zh"]'); await page.click('[data-lang="en"]'); await page.waitForTimeout(100);
+check(await langs() === 'en:false zh:true', `text in scans: 中文 alone (${await langs()})`);
 await page.click('#s-close'); await page.waitForTimeout(250);
 await page.reload();
 await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+check(await langs() === 'en:false zh:true' && await page.evaluate(() => window.__umbraTest.ocrLang()) === 'ch', `text in scans: saved, and 中文 uses the Chinese model (${await langs()})`);
+await page.click('[data-lang="en"]'); await page.click('[data-lang="zh"]'); await page.waitForTimeout(100);
+check(await page.evaluate(() => window.__umbraTest.ocrLang()) === 'en', 'text in scans: English only uses the English model');
+await page.click('#s-close'); await page.waitForTimeout(250);
+// 1.2 dev builds saved one choice: "English + 中文" becomes both switches on.
+await page.evaluate((k) => { const v = JSON.parse(localStorage.getItem(k)); delete v.ocrLangs; v.ocrLang = 'ch'; localStorage.setItem(k, JSON.stringify(v)); }, key);
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+check(await langs() === 'en:true zh:true', `text in scans: older "English + 中文" setting kept as both on (${await langs()})`);
+await page.click('#s-close'); await page.waitForTimeout(250);
 const awSaved = (await page.evaluate(() => window.__umbraTest.detectPrefs())).always;
 check(JSON.stringify(awSaved) === '["Tan Ah Kow","Ali"]', `always redact: removing works and the list is saved (${JSON.stringify(awSaved)})`);
 {
