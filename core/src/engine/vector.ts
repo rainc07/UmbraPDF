@@ -76,11 +76,28 @@ export async function exportVector(
   source: Uint8Array, password: string | undefined, redactions: RedactionMap,
   onProgress: Progress = () => {}, opts: VectorOptions = {},
 ): Promise<Uint8Array> {
+  return (await redactVector(source, password, redactions, onProgress, opts.blackBoxes !== false, false)).bytes;
+}
+
+/**
+ * The redacted copy, plus the same redaction without black boxes (`bare`, only to prove nothing readable is
+ * left under them), from one MuPDF pass: the boxes are drawn after the bare copy is saved.
+ */
+export async function exportVectorChecked(
+  source: Uint8Array, password: string | undefined, redactions: RedactionMap, onProgress: Progress = () => {},
+): Promise<{ bytes: Uint8Array; bare?: Uint8Array }> {
+  return redactVector(source, password, redactions, onProgress, true, redactions.some((r) => r?.length));
+}
+
+async function redactVector(
+  source: Uint8Array, password: string | undefined, redactions: RedactionMap,
+  onProgress: Progress, blackBoxes: boolean, withBare: boolean,
+): Promise<{ bytes: Uint8Array; bare?: Uint8Array }> {
   onProgress('Loading redaction engine…', 0);
   const m = await loadMuPdf();
   const doc = m.Document.openDocument(source.slice(), 'application/pdf').asPDF();
   if (!doc) throw new Error('Not a PDF');
-  let saved: Uint8Array;
+  let saved: Uint8Array, bare: Uint8Array | undefined;
   try {
     if (doc.needsPassword() && !doc.authenticatePassword(password ?? '')) throw new Error('Wrong or missing password');
     // Hidden layers (optional content switched off) hold content the user never saw, so it can't have been
@@ -94,7 +111,7 @@ export async function exportVector(
     const hiddenPages: number[] = [];
     let lastYield = 0;
     for (let i = 0; i < n; i++) {
-      onProgress(`Redacting page ${i + 1}/${n}`, (i / n) * 0.8);
+      onProgress(`Redacting page ${i + 1}/${n}`, (i / n) * 0.7);
       // MuPDF runs on this thread: let the page draw the progress (and stay responsive) every ~50 ms.
       if (performance.now() - lastYield > 50) { await nextTask(); lastYield = performance.now(); }
       const page = doc.loadPage(i) as import('mupdf').PDFPage;
@@ -106,7 +123,7 @@ export async function exportVector(
       }
       if (rects.length) {
         page.applyRedactions(
-          opts.blackBoxes !== false,
+          blackBoxes && !withBare, // with a bare copy, the boxes are drawn after it is saved
           m.PDFPage.REDACT_IMAGE_PIXELS,              // blank the image pixels under the box
           m.PDFPage.REDACT_LINE_ART_REMOVE_IF_COVERED, // drop vector shapes fully under a box
           m.PDFPage.REDACT_TEXT_REMOVE,               // drop every glyph touching a box
@@ -125,7 +142,15 @@ export async function exportVector(
     const root = trailer.get('Root');
     for (const k of CATALOG_STRIP) root.delete(k);
     trailer.delete('Info');
-    onProgress('Rebuilding file', 0.85);
+    if (withBare) {
+      onProgress('Rebuilding file', 0.72);
+      await nextTask();
+      const b = doc.saveToBuffer('compress=yes');
+      bare = b.asUint8Array().slice();
+      b.destroy();
+      if (blackBoxes) drawBlackBoxes(m, doc, redactions);
+    }
+    onProgress('Rebuilding file', 0.8);
     await nextTask();
     // Full rewrite (never incremental: old revisions would keep the original), dropping unused objects.
     const buf = doc.saveToBuffer('garbage=4,compress=yes,clean=yes');
@@ -135,7 +160,33 @@ export async function exportVector(
     doc.destroy();
   }
   onProgress('Cleaning up', 0.92);
-  return cleanup(saved);
+  return { bytes: await cleanup(saved), bare };
+}
+
+/**
+ * Solid black over every box, as applyRedactions' own black boxes: page content drawn last, from the page's
+ * initial graphics state (the old content is wrapped in q … Q), with the boxes taken from page space to PDF space.
+ */
+function drawBlackBoxes(m: MuPdf, doc: import('mupdf').PDFDocument, redactions: RedactionMap) {
+  const f = (v: number) => (Math.round(v * 1000) / 1000).toString();
+  redactions.forEach((rects, i) => {
+    if (!rects?.length) return;
+    const page = doc.loadPage(i) as import('mupdf').PDFPage;
+    const inv = m.Matrix.invert(page.getTransform());
+    const fill = rects.map((r) => {
+      const [x0, y0, x1, y1] = m.Rect.transform([r.x, r.y, r.x + r.w, r.y + r.h], inv);
+      return `${f(Math.min(x0, x1))} ${f(Math.min(y0, y1))} ${f(Math.abs(x1 - x0))} ${f(Math.abs(y1 - y0))} re`;
+    }).join('\n');
+    const po = page.getObject();
+    const old = po.get('Contents');
+    const list = doc.newArray();
+    list.push(doc.addStream('q\n', {}));
+    if (old.isArray()) for (let k = 0; k < old.length; k++) list.push(old.get(k));
+    else if (!old.isNull()) list.push(old);
+    list.push(doc.addStream(`Q\nq\n0 g\n${fill}\nf\nQ\n`, {}));
+    po.put('Contents', list);
+    page.destroy();
+  });
 }
 
 /** Second pass (pdf-lib): strip metadata/scripts everywhere and ActualText/Alt from marked content. */

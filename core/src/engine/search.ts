@@ -44,6 +44,11 @@ export interface ExtractOptions {
    * `cards`: it shows ID-card wording, so the cards on it are found and read here (the rest is kept).
    */
   preread?: (index: number) => Promise<{ words: OcrWord[]; scale: number; cards: boolean } | null>;
+  /**
+   * Only characters near these areas need exact boxes (the safety check): a text run nowhere near them gets
+   * its run's box for every character, which skips the slow per-character measuring.
+   */
+  near?: readonly Rect[];
 }
 const DEFAULT_EXTRACT: ExtractOptions = { ocr: 'auto', ocrDpi: 0 };
 /** Page render resolution for OCR when not set: PaddleOCR reads well at 220 DPI (less to render and move), Tesseract wants 300. */
@@ -109,13 +114,26 @@ async function ensureFonts(page: PDFPageProxy, names: string[]): Promise<void> {
   c.width = c.height = 0;
 }
 
-async function textLayer(page: PDFPageProxy, index: number): Promise<PageText> {
+async function textLayer(page: PDFPageProxy, index: number, near?: readonly Rect[]): Promise<PageText> {
   const tc = await page.getTextContent();
   const items = tc.items.filter((it): it is TextItem => 'str' in it);
   const styles = tc.styles as Record<string, TextStyle>;
-  await ensureFonts(page, [...new Set(items.filter((i) => i.str).map((i) => i.fontName))]);
-  const have = loadedFamilies();
   const vp = page.getViewport({ scale: 1 });
+  /** Every box a character of this run could get (generous), in page points. */
+  const runBox = (it: TextItem): Rect | null => {
+    const tx = Util.transform(vp.transform, it.transform) as number[];
+    const h = Math.hypot(tx[2], tx[3]), lenX = Math.hypot(tx[0], tx[1]);
+    if (!(h > 0 && lenX > 0)) return null;
+    const d = [tx[0] / lenX, tx[1] / lenX], u = [tx[2] / h, tx[3] / h];
+    const at = (s: number, v: number): [number, number] => [tx[4] + d[0] * s + u[0] * v, tx[5] + d[1] * s + u[1] * v];
+    const s0 = -0.3 * h, s1 = it.width + 0.3 * h, v0 = -0.8 * h, v1 = 1.5 * h;
+    return aabb([at(s0, v0), at(s1, v0), at(s0, v1), at(s1, v1)]);
+  };
+  const far = (r: Rect | null) => !!near && !!r && !near.some((b) => r.x < b.x + b.w + 1 && r.x + r.w > b.x - 1 && r.y < b.y + b.h + 1 && r.y + r.h > b.y - 1);
+  const coarse = items.map((it) => (near ? runBox(it) : null));
+  const exact = items.filter((it, k) => it.str && !far(coarse[k]));
+  await ensureFonts(page, [...new Set(exact.map((i) => i.fontName))]);
+  const have = loadedFamilies();
   const b = new Builder();
   let prev: { x: number; y: number; h: number } | null = null;
 
@@ -139,11 +157,10 @@ async function textLayer(page: PDFPageProxy, index: number): Promise<PageText> {
       let asc = st?.ascent ?? 0.8, desc = st?.descent ?? -0.2;
       if (!(asc >= 0.5 && asc <= 1.3)) asc = 0.85;
       if (!(desc <= 0 && desc >= -0.6)) desc = -0.22;
-      const fam = have.has(it.fontName) ? it.fontName : null;
-      const adv = advances(str, fam, st?.fontFamily || 'sans-serif');
       const W = it.width, padA = 0.08 * h, top = (asc + 0.06) * h, bot = (desc - 0.06) * h;
       const at = (s: number, v: number): [number, number] => [o[0] + dir[0] * s + up[0] * v, o[1] + dir[1] * s + up[1] * v];
-      for (let k = 0; k < str.length; k++) {
+      if (far(coarse[gi])) for (let k = 0; k < str.length; k++) b.push(str[k], coarse[gi]!, gi);
+      else for (let k = 0, adv = advances(str, have.has(it.fontName) ? it.fontName : null, st?.fontFamily || 'sans-serif'); k < str.length; k++) {
         const s0 = adv[k] * W - padA, s1 = adv[k + 1] * W + padA;
         b.push(str[k], aabb([at(s0, top), at(s1, top), at(s0, bot), at(s1, bot)]), gi);
       }
@@ -345,7 +362,7 @@ export async function extractPageText(doc: PDFDocumentProxy, index: number, opts
   const page = await doc.getPage(index + 1);
   if (o.ocr !== 'always') {
     const tt = performance.now();
-    const t = await textLayer(page, index);
+    const t = await textLayer(page, index, o.near);
     const tms = Math.round(performance.now() - tt);
     // A long wait here is Android pausing the page while the app was hidden (native reading carries on).
     lastOcrStats.log.push(`text layer: ${tms} ms${tms > 5000 ? ' (likely the page paused while the app was in the background)' : ''}`);

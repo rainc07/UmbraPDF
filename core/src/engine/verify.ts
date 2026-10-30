@@ -99,9 +99,13 @@ export async function verifyOutput(
   try {
     for (let i = 1; i <= doc.numPages; i++) {
       onProgress(`Verifying page ${i}/${doc.numPages}`, i / doc.numPages);
-      // Character geometry (rotation-aware). A character whose centre lies inside a box is a leak.
-      const pt = await extractPageText(doc, i - 1, { ocr: 'never' });
       const boxes = ctx.redactions[i - 1] ?? [];
+      const page = await doc.getPage(i);
+      annotations += (await page.getAnnotations()).length;
+      // Keep original text keeps the text of pages without boxes on purpose: nothing there can be inside a box.
+      if (vector && !boxes.length) { page.cleanup(); continue; }
+      // Character geometry (rotation-aware). A character whose centre lies inside a box is a leak.
+      const pt = await extractPageText(doc, i - 1, { ocr: 'never', near: boxes });
       let c = 0;
       for (let k = 0; k < pt.text.length; k++) {
         if (!pt.text[k].trim()) continue;
@@ -112,8 +116,6 @@ export async function verifyOutput(
         if (boxes.some((b) => cx > b.x + 0.5 && cx < b.x + b.w - 0.5 && cy > b.y + 0.5 && cy < b.y + b.h - 0.5)) textInBoxes++;
       }
       if (c) { textChars += c; textPages.push(i); }
-      const page = await doc.getPage(i);
-      annotations += (await page.getAnnotations()).length;
       page.cleanup();
     }
     if (await doc.getAttachments()) issues.push('Attachments present');

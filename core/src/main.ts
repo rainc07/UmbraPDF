@@ -2,7 +2,7 @@ import './ui/styles.css';
 import {
   openPdf, closePdf, pageSizes, renderToCanvas, exportRedacted, verifyOutput, ocrRedactedRegions,
   PasswordRequiredError, DEFAULT_EXPORT,
-  PageTextCache, pageTextWords, searchDocument, exportVector, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
+  PageTextCache, pageTextWords, searchDocument, exportVector, exportVectorChecked, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
   normAlways, ALWAYS_MAX, splitPdf, planSplit, SplitRangeError,
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
   type Hit, type SearchPattern, type CustomPattern, type SplitSpec, type SplitPart,
@@ -68,7 +68,7 @@ let modalOnDismiss: (() => void) | null = null;
 function modal(html: string, dismissable = false, onDismiss: (() => void) | null = null) {
   const wasOpen = !$('#modal').hidden && !$('#modal').classList.contains('closing');
   clearTimeout(modalCloseTimer); $('#modal').classList.remove('closing');
-  $('#toast').classList.remove('show'); $('#sheet').innerHTML = html; $('#modal').hidden = false;
+  $('#toast').classList.remove('show'); $('#sheet').innerHTML = html; $('#sheet').onscroll = null; $('#modal').hidden = false;
   // Step to step (options → progress → result): cross-fade the content instead of jumping.
   if (wasOpen) $('#sheet').animate?.([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], { duration: 200, easing: 'ease-out' });
   modalDismissable = dismissable; modalOnDismiss = onDismiss;
@@ -694,19 +694,66 @@ const row2 = (title: string, control: string, id: string, help?: string, forId?:
 /** A heading with a (?) that opens the longer explanation right under it. */
 const helpH = (tag: 'h2' | 'h3', title: string, id: HelpId) => `<${tag} class="hh">${title}${helpBtn(id, title)}</${tag}>${helpBox(id)}`;
 const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+const EASE = 'cubic-bezier(.2, .8, .2, 1)';
+/** Its children's margins stay inside it, so its height while animating is the height it ends with (no jump at the end). */
+function contain(el: HTMLElement) {
+  if (!el.hidden && !el.classList.contains('contain') && getComputedStyle(el).display === 'block') el.classList.add('contain');
+}
+/**
+ * Bottom margin for a slid-away box: gone, the margins above and below it overlap (collapse) into the larger
+ * one; at zero height it still keeps them apart. This pulls them together so the last frame matches.
+ */
+function goneMargin(el: HTMLElement): string {
+  const pd = el.parentElement ? getComputedStyle(el.parentElement).display : '';
+  if (/flex|grid/.test(pd)) return '0px';
+  const near = (e: Element | null, next: boolean): Element | null => { while (e && (e as HTMLElement).hidden) e = next ? e.nextElementSibling : e.previousElementSibling; return e; };
+  const prev = near(el.previousElementSibling, false), next = near(el.nextElementSibling, true);
+  const pm = prev ? Math.max(0, parseFloat(getComputedStyle(prev).marginBottom) || 0) : 0;
+  const nm = next ? Math.max(0, parseFloat(getComputedStyle(next).marginTop) || 0) : 0;
+  return `${-Math.min(pm, nm)}px`;
+}
+/** Run a height animation on `el` (border-box, clipped), then hand it back to normal layout. */
+function animateHeight(el: HTMLElement, frames: Keyframe[], duration: number, done?: () => void) {
+  el.classList.add('sliding');
+  const a = el.animate(frames, { duration, easing: EASE });
+  a.onfinish = () => { el.classList.remove('sliding'); done?.(); };
+  a.oncancel = () => el.classList.remove('sliding');
+  return a;
+}
 /** Show or hide with a short height + fade, so what's below slides instead of jumping. `instant` for first render. */
 function slide(el: HTMLElement, show: boolean, instant = false) {
   if ((el.dataset.slide ?? String(!el.hidden)) === String(show)) return;
   el.dataset.slide = String(show);
   el.getAnimations?.().forEach((a) => a.cancel());
-  if (instant || reduceMotion?.matches || !el.animate) { el.hidden = !show; return; }
+  if (instant || reduceMotion?.matches || !el.animate) { el.hidden = !show; contain(el); return; }
   el.hidden = false;
+  contain(el);
   const cs = getComputedStyle(el);
-  const full = { height: `${el.offsetHeight}px`, opacity: 1, marginTop: cs.marginTop, marginBottom: cs.marginBottom, paddingTop: cs.paddingTop, paddingBottom: cs.paddingBottom };
-  const none = { height: '0px', opacity: 0, marginTop: '0px', marginBottom: '0px', paddingTop: '0px', paddingBottom: '0px' };
-  el.style.overflow = 'hidden';
-  const a = el.animate(show ? [none, full] : [full, none], { duration: 220, easing: 'cubic-bezier(.2, .8, .2, 1)' });
-  a.onfinish = () => { el.style.overflow = ''; if (!show) el.hidden = true; };
+  const full = { height: `${el.offsetHeight}px`, opacity: 1, marginTop: cs.marginTop, marginBottom: cs.marginBottom, paddingTop: cs.paddingTop,
+    paddingBottom: cs.paddingBottom, borderTopWidth: cs.borderTopWidth, borderBottomWidth: cs.borderBottomWidth };
+  const none = { height: '0px', opacity: 0, marginTop: '0px', marginBottom: goneMargin(el), paddingTop: '0px', paddingBottom: '0px', borderTopWidth: '0px', borderBottomWidth: '0px' };
+  animateHeight(el, show ? [none, full] : [full, none], 240, () => { if (!show) el.hidden = true; });
+}
+/**
+ * One box in place of another (Split's ways): the box keeps its place and changes height while the new
+ * options fade in, instead of one box closing while another opens. To or from nothing, it slides.
+ */
+function swapBox(boxes: HTMLElement[], on: HTMLElement | null, instant = false) {
+  const cur = boxes.find((b) => (b.dataset.slide ?? String(!b.hidden)) === 'true') ?? null;
+  if (cur === on) return;
+  if (!cur || !on || instant || reduceMotion?.matches || !on.animate) { for (const b of boxes) slide(b, b === on, instant); return; }
+  // Mid-animation the old box's current height is where the new one starts.
+  const h0 = cur.getBoundingClientRect().height;
+  cur.getAnimations().forEach((a) => a.cancel());
+  cur.hidden = true; cur.dataset.slide = 'false';
+  on.getAnimations().forEach((a) => a.cancel());
+  on.querySelectorAll<HTMLElement>(':scope > *').forEach((c) => c.getAnimations().forEach((a) => a.cancel()));
+  on.hidden = false; on.dataset.slide = 'true';
+  contain(on);
+  const h1 = on.offsetHeight;
+  animateHeight(on, [{ height: `${h0}px` }, { height: `${h1}px` }], 280);
+  on.querySelectorAll<HTMLElement>(':scope > *').forEach((c) =>
+    c.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 220, delay: 70, easing: 'ease-out', fill: 'backwards' }));
 }
 document.addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLElement>('[data-help]');
@@ -808,8 +855,7 @@ function settingsDialog() {
   const seg = (v: ThemePref, l: string) => `<button data-theme-opt="${v}" aria-pressed="${prefs.theme === v}">${l}</button>`;
   const optItems = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android')
     .map((k) => `<div class="sitem">${optRows([k])}</div>`).join('');
-  modal(`<h2>Settings</h2>
-    <div class="ssearch"><input id="s-search" type="search" placeholder="Search settings" autocomplete="off" spellcheck="false" enterkeyhint="search" aria-label="Search settings"></div>
+  modal(`<div class="ssearch"><h2>Settings</h2><input id="s-search" type="search" placeholder="Search settings" autocomplete="off" spellcheck="false" enterkeyhint="search" aria-label="Search settings"></div>
     <p class="hint" id="s-none" hidden>No settings match.</p>
     <section class="sset"><h3>Appearance</h3>
     <div class="sitem" data-k="theme dark light mode night colour color"><div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div></div></section>
@@ -831,6 +877,9 @@ function settingsDialog() {
     <section class="sset"><h3>About</h3>
     <div class="sitem" data-k="version licence privacy"><p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p></div></section>
     <div class="row"><button id="s-close" class="primary">Done</button></div>`, true);
+  // The title and search stay on top; a line under them once the list scrolls beneath.
+  const sheet = $('#sheet'), head = $('.ssearch');
+  sheet.onscroll = () => head.classList.toggle('stuck', sheet.scrollTop > 4);
   // Search: only matching settings stay; a section title match keeps its whole section.
   const sq = $<HTMLInputElement>('#s-search');
   sq.oninput = () => {
@@ -916,12 +965,12 @@ function updateSheetSpace() {
     return;
   }
   stage.style.setProperty('--side-l', '0px'); stage.style.setProperty('--side-r', '0px');
-  const h = p.hidden || p.classList.contains('closing') ? 0 : p.offsetHeight;
+  const h = p.hidden || p.classList.contains('closing') ? 0 : p.offsetHeight - sheetShift(p);
   stage.style.setProperty('--sheet-h', `${Math.round(h)}px`);
 }
 new ResizeObserver(() => { if (!sheetDrag) updateSheetSpace(); }).observe($('#panel'));
-sideMode.addEventListener('change', () => setSnap(snap));
-new ResizeObserver(() => { if (!$('#panel').hidden) setSnap(snap); }).observe(stage);
+sideMode.addEventListener('change', () => setSnap(snap, false));
+new ResizeObserver(() => { if (!$('#panel').hidden && !sheetDrag) setSnap(snap, false); }).observe(stage);
 
 // Bottom sheet stops: just the header, 40% of the screen, or covering the whole document.
 type Snap = 'peek' | 'half' | 'full';
@@ -932,13 +981,40 @@ function snapHeights(): Record<Snap, number> {
   const head = $('#panel').querySelector<HTMLElement>('.phead')?.offsetHeight ?? 64;
   return { peek: head, half: Math.max(head, Math.round(H * 0.4)), full: H };
 }
-function setSnap(to: Snap) {
+/** How far the sheet is pushed down below its height (it moves by this, so moving never re-lays out its list). */
+const sheetShift = (p: HTMLElement) => parseFloat(p.style.translate.split(' ')[1] ?? '') || 0;
+let settleTimer = 0;
+function setSnap(to: Snap, animate = true) {
   const p = $('#panel');
   snap = to;
   p.dataset.snap = to;
-  if (sideMode.matches) { p.style.height = ''; updateSheetSpace(); return; }
-  p.style.height = `${snapHeights()[to]}px`;
-  updateSheetSpace();
+  if (sideMode.matches) { clearTimeout(settleTimer); p.style.height = ''; p.style.translate = ''; updateSheetSpace(); return; }
+  settleSheet(p, snapHeights()[to], animate);
+}
+/**
+ * Glide the sheet to show `to` px. Only the compositor moves it: the sheet is made tall enough for both the
+ * start and the end, slides with `translate`, and takes its final height once it has stopped.
+ */
+function settleSheet(p: HTMLElement, to: number, animate: boolean) {
+  clearTimeout(settleTimer);
+  const instant = () => {
+    p.classList.add('dragging');
+    p.style.height = `${to}px`; p.style.translate = '';
+    void p.offsetHeight;
+    p.classList.remove('dragging');
+    updateSheetSpace();
+  };
+  const from = p.offsetHeight - sheetShift(p);
+  if (!animate || p.hidden || reduceMotion?.matches || Math.abs(from - to) < 1) { instant(); return; }
+  const H = Math.max(p.offsetHeight, to);
+  p.classList.add('dragging');
+  if (p.offsetHeight !== H) p.style.height = `${H}px`;
+  p.style.translate = `0 ${H - from}px`;
+  void p.offsetHeight;
+  p.classList.remove('dragging');
+  p.style.translate = `0 ${H - to}px`;
+  updateSheetSpace(); // the document and zoom buttons move with it, once
+  settleTimer = window.setTimeout(() => { if (!p.hidden) instant(); }, 360);
 }
 
 function showPanel(html: string) {
@@ -951,7 +1027,7 @@ function showPanel(html: string) {
   const ph = p.querySelector<HTMLElement>('.pbody > .ph');
   if (ph) p.querySelector('.phead')!.append(ph);
   if (!wasOpen) snap = 'half';
-  setSnap(snap);
+  setSnap(snap, wasOpen);
   if (wasOpen) {
     // Switching Find <-> Auto Detect: cross-fade the content, the sheet stays put.
     p.animate?.([{ opacity: 0.2 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' });
@@ -972,13 +1048,13 @@ function showPanel(html: string) {
  */
 function bindGrab(p: HTMLElement) {
   const head = p.querySelector<HTMLElement>('.phead')!;
-  let y0: number | null = null, h0 = 0, moved = false, fromTitle = false, last: [number, number][] = [];
+  let y0: number | null = null, h0 = 0, cur = 0, moved = false, fromTitle = false, last: [number, number][] = [];
   head.onpointerdown = (e) => {
     const t = e.target as HTMLElement;
     fromTitle = !!t.closest('.ph b, .grab');
     if (t.closest('button:not(.grab), input, a')) return; // its own buttons still work
     if (sideMode.matches && !t.closest('.grab')) return;
-    y0 = e.clientY; h0 = p.offsetHeight; moved = false; last = [[e.clientY, e.timeStamp]];
+    y0 = e.clientY; h0 = cur = p.offsetHeight - sheetShift(p); moved = false; last = [[e.clientY, e.timeStamp]];
     head.setPointerCapture(e.pointerId);
   };
   head.onpointermove = (e) => {
@@ -992,9 +1068,16 @@ function bindGrab(p: HTMLElement) {
       return;
     }
     if (!moved && Math.abs(e.clientY - y0) < 6) return;
-    if (!moved) { moved = true; sheetDrag = true; p.classList.add('dragging'); }
     const { peek, full } = snapHeights();
-    p.style.height = `${Math.min(full, Math.max(peek, h0 - (e.clientY - y0)))}px`;
+    if (!moved) {
+      // Full height for the whole drag; only `translate` changes while the finger moves.
+      moved = true; sheetDrag = true; clearTimeout(settleTimer); p.classList.add('dragging');
+      h0 = p.offsetHeight - sheetShift(p);
+      p.style.height = `${full}px`;
+      p.style.translate = `0 ${full - h0}px`;
+    }
+    cur = Math.min(full, Math.max(peek, h0 - (e.clientY - y0)));
+    p.style.translate = `0 ${full - cur}px`;
     last.push([e.clientY, e.timeStamp]); if (last.length > 5) last.shift();
   };
   const end = (e: PointerEvent) => {
@@ -1006,7 +1089,7 @@ function bindGrab(p: HTMLElement) {
     // Where a flick would carry it in ~0.2 s, then the nearest stop.
     const [ya, ta] = last[0], [yb, tb] = last[last.length - 1];
     const v = tb > ta ? (yb - ya) / (tb - ta) : 0; // px per ms, + = down
-    const aim = p.offsetHeight - v * 200;
+    const aim = cur - v * 200;
     const hs = snapHeights();
     const best = (Object.keys(hs) as Snap[]).reduce((a, b) => (Math.abs(hs[b] - aim) < Math.abs(hs[a] - aim) ? b : a));
     setSnap(best);
@@ -1484,25 +1567,31 @@ function openDetect() {
 // ---------- Export ----------
 export interface ExportOutcome { bytes: Uint8Array; report: VerifyReport; downscaled: { page: number; dpi: number }[]; ocrWords: number; timings: [string, number][] }
 
-async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: string, f: number) => void, method: 'vector' | 'image' = 'image'): Promise<ExportOutcome> {
+async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: string, f: number, step: ExportStep) => void, method: 'vector' | 'image' = 'image'): Promise<ExportOutcome> {
   if (!S.doc) throw new Error('No document');
   const timings: [string, number][] = [];
   let t0 = performance.now();
   const lap = (name: string) => { const t = performance.now(); timings.push([name, t - t0]); t0 = t; };
-  const res = method === 'vector'
-    ? { bytes: await exportVector(S.bytes!, S.password, S.boxes, onProgress), downscaled: [], ocrWords: 0 }
-    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr', scanWords: pt.scanWords })) : undefined);
-  lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
-  const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
+  const boxed = S.boxes.some((b) => b.length);
+  // One bar for the whole export: each step gets its share (roughly its usual time) and the bar never goes back.
+  const [made, structured] = !boxed ? [0.85, 1] : method === 'vector' ? [0.45, 0.65] : [0.8, 0.85];
+  const part = (a: number, b: number, step: ExportStep) => (m: string, f: number) => onProgress(m, a + (b - a) * Math.min(1, Math.max(0, f)), step);
+  const vec = method === 'vector' ? await exportVectorChecked(S.bytes!, S.password, S.boxes, part(0, made, 'make')) : null;
+  const res = vec
+    ? { bytes: vec.bytes, downscaled: [], ocrWords: 0 }
+    : await exportRedacted(S.doc, S.boxes, opts, part(0, made, 'make'), S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr', scanWords: pt.scanWords })) : undefined);
+  lap(vec ? 'Redact (MuPDF)' : 'Build pages');
+  const report = await verifyOutput(res.bytes, part(made, structured, 'check'), { searchable: opts.searchable, redactions: S.boxes, mode: method });
   lap('Structure check');
-  if (method === 'vector' && S.boxes.some((b) => b.length)) {
+  const under = part(structured, 1, 'check');
+  if (vec && boxed) {
     // Keep original text leaves shapes that are only partly under a box (e.g. text drawn as outlines) in the file,
-    // hidden by the black box. So the same redaction without boxes must show nothing readable where the boxes go.
-    // Always run, and fail closed: the structural checks above only see real text.
-    onProgress('Checking under the black boxes', 1);
+    // hidden by the black box. So the same redaction without boxes (made in the same pass) must show nothing
+    // readable where the boxes go. Always run, and fail closed: the structural checks above only see real text.
+    under('Checking under the black boxes', 0);
     try {
-      const bare = await exportVector(S.bytes!, S.password, S.boxes, () => {}, { blackBoxes: false });
-      report.ocr = await ocrRedactedRegions(bare, S.boxes, onProgress);
+      if (!vec.bare) throw new Error('no copy without boxes');
+      report.ocr = await ocrRedactedRegions(vec.bare, S.boxes, under);
       if (report.ocr.leaks.length) {
         report.ok = false;
         report.issues.push(`Readable content left under ${report.ocr.leaks.length} box(es). Use "Image only" for this file`);
@@ -1512,10 +1601,10 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
       report.issues.push(`Could not check under the black boxes: ${(e as Error).message}`);
     }
     lap('Under-box check');
-  } else if (ocr && S.boxes.some((b) => b.length)) {
+  } else if (ocr && boxed) {
     try {
-      onProgress('Double-checking blacked-out areas', 1);
-      report.ocr = await ocrRedactedRegions(res.bytes, S.boxes, onProgress);
+      under('Double-checking blacked-out areas', 0);
+      report.ocr = await ocrRedactedRegions(res.bytes, S.boxes, under);
       if (report.ocr.leaks.length) {
         report.ok = false;
         report.issues.push(`OCR found text in ${report.ocr.leaks.length} redacted region(s)`);
@@ -1526,11 +1615,15 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
     }
     lap('Black-box check');
   }
+  onProgress('Done', 1, 'check');
   const out = { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords, timings };
   // Kept so Split (or Export again) with the same boxes and settings needn't redo the redaction and its checks.
   S.verified = ocr && report.ok ? { key: exportKey(opts, method), out } : null;
   return out;
 }
+
+/** 'make': building the redacted copy; 'check': proving it's safe. */
+type ExportStep = 'make' | 'check';
 
 /** What a redacted copy depends on: the boxes and the export settings that shape it. */
 const exportKey = (opts: ExportOptions, method: 'vector' | 'image') =>
@@ -1547,7 +1640,7 @@ function exportChoiceHtml(e: ExportPrefs): string {
   return `<div class="segctl" id="x-method">
       <button data-m="vector" aria-pressed="${e.method === 'vector'}">Keep original text</button>
       <button data-m="image" aria-pressed="${e.method === 'image'}">Image only</button></div>
-    <div id="x-image-opts">
+    <div class="spbox" id="x-image-opts">
     ${helpH('h3', 'Image settings', 'image')}
     <label class="row2"><span>Quality</span><select id="x-dpi">
       ${[[150, 'Small file'], [200, 'Good'], [300, 'High (recommended)'], [400, 'Very high'], [600, 'Print']].map(([d, l]) =>
@@ -1593,8 +1686,9 @@ function exportDialog() {
     ${splitOptionsHtml(S.sizes.length)}
     <div class="row"><button id="x-cancel">Cancel</button><button id="x-go" class="primary">Continue</button></div>`, true);
   const split = bindSplitOptions(S.sizes.length, $<HTMLButtonElement>('#x-go'));
-  // Start loading the redaction engine (~10 MB WASM) while the user reads the dialog.
-  const warm = () => { if (ex.method === 'vector') void loadMuPdf().catch(() => {}); };
+  // Start loading the redaction engine (~10 MB WASM) while the user reads the dialog, after any animation
+  // (loading it holds this thread for a moment).
+  const warm = () => { if (ex.method === 'vector') setTimeout(() => void loadMuPdf().catch(() => {}), 400); };
   bindExportChoice(ex, warm);
   warm();
   $('#x-cancel').onclick = closeModal;
@@ -1611,11 +1705,11 @@ function exportDialog() {
       const xo: ExportOptions = { ...opts, searchable: method === 'image' && opts.searchable };
       // Exported already with these boxes and settings (e.g. once whole, now split): reuse that checked copy.
       const done = S.verified?.key === exportKey(xo, method) ? S.verified.out : null;
-      const out = done ?? await runExport(xo, true, (m, f) => {
-        const msg = document.getElementById('x-msg'); if (msg && prefs.advanced) msg.textContent = m;
-        else if (msg) msg.textContent = f < 1 ? 'Making the pages…' : 'Checking it\'s safe…';
+      const out = done ?? await runExport(xo, true, (m, f, step) => {
+        const label = step === 'make' ? 'Making the pages' : 'Checking it\'s safe';
+        const msg = document.getElementById('x-msg'); if (msg) msg.textContent = prefs.advanced ? m : `${label}…`;
         const bar = document.getElementById('x-bar') as HTMLProgressElement | null; if (bar) bar.value = f;
-        w.progress(f < 1 ? 'Making the pages' : 'Checking it\'s safe', f);
+        w.progress(label, f);
       }, method);
       if (out.report.ok && spec) {
         // Never cut the original: only the redacted copy that just passed the safety check.
@@ -1748,7 +1842,7 @@ function bindSplitOptions(n: number, go: HTMLButtonElement): { spec: () => Split
     : mode === 'ranges' ? { mode, ranges: $<HTMLInputElement>('#sp-r').value }
     : { mode, cut, rtl: cut === 'lr' && $<HTMLInputElement>('#sp-rtl').checked, widerOnly: $<HTMLInputElement>('#sp-wide').checked };
   const show = (instant = false) => {
-    for (const m of ['every', 'ranges', 'half']) slide($(`#sp-${m}`), m === mode, instant);
+    swapBox(['every', 'ranges', 'half'].map((m) => $(`#sp-${m}`)), mode === 'none' ? null : $(`#sp-${mode}`), instant);
     $('#sp-mode').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === mode)));
     $('#sp-cut').querySelectorAll<HTMLElement>('[data-c]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.c === cut)));
     slide($('#sp-rtl-row'), cut === 'lr', instant);
@@ -1910,6 +2004,23 @@ syncToolbar();
     return t;
   },
   ocrRegions: (bytes: Uint8Array, boxes: Rect[][]) => ocrRedactedRegions(bytes, boxes),
+  // Share of near-black pixels inside each box (rendered at 72 DPI), per page: 1 = fully blacked out.
+  boxDarkness: async (bytes: Uint8Array, boxes: Rect[][]) => {
+    const d = await openPdf(bytes);
+    const out: number[][] = [];
+    for (let i = 0; i < boxes.length; i++) {
+      const c = document.createElement('canvas');
+      await renderToCanvas(await d.getPage(i + 1), c, 2);
+      const g = c.getContext('2d', { willReadFrequently: true })!;
+      out.push(boxes[i].map((r) => {
+        const px = g.getImageData(Math.round(r.x * 2) + 2, Math.round(r.y * 2) + 2, Math.max(1, Math.round(r.w * 2) - 4), Math.max(1, Math.round(r.h * 2) - 4)).data;
+        let dark = 0; for (let k = 0; k < px.length; k += 4) if (px[k] + px[k + 1] + px[k + 2] < 90) dark++;
+        return dark / (px.length / 4);
+      }));
+    }
+    await closePdf(d);
+    return out;
+  },
   boxes: () => S.boxes,
   zoom: () => S.zoom,
   detectPrefs: () => prefs.detect,
