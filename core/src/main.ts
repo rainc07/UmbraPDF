@@ -2,12 +2,13 @@ import './ui/styles.css';
 import {
   openPdf, closePdf, pageSizes, renderToCanvas, exportRedacted, verifyOutput, ocrRedactedRegions,
   PasswordRequiredError, DEFAULT_EXPORT,
-  PageTextCache, pageTextWords, searchDocument, exportVector, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
+  PageTextCache, pageTextWords, searchDocument, exportVector, exportVectorChecked, loadMuPdf, literalPattern, buildPatterns, compileCustom, PRESETS, DEFAULT_PRESET_IDS,
   normAlways, ALWAYS_MAX, splitPdf, planSplit, SplitRangeError,
   type PDFDocumentProxy, type PageSize, type Rect, type VerifyReport, type ExportOptions,
   type Hit, type SearchPattern, type CustomPattern, type SplitSpec, type SplitPart,
 } from './engine';
 import { lastOcrStats, resetOcrStats, setOcrEngine, warmUpOcr } from './engine/ocr';
+import { getOcrLang, setOcrLang, type OcrLang } from './engine/ppocr';
 import { abortable, isAbort } from './engine/search';
 import { detectHost, type OpenedFile } from './platform/host';
 import { NativeReader } from './platform/nativeRead';
@@ -64,10 +65,11 @@ function toast(msg: string, ms = 2600) {
 /** dismissable: tapping the dimmed background (or Back) closes it. Off for progress and must-answer dialogs. */
 let modalDismissable = false;
 let modalOnDismiss: (() => void) | null = null;
-function modal(html: string, dismissable = false, onDismiss: (() => void) | null = null) {
+/** `fill`: on a phone the sheet takes the whole height, so options opening and closing inside it never resize it. */
+function modal(html: string, dismissable = false, onDismiss: (() => void) | null = null, fill = false) {
   const wasOpen = !$('#modal').hidden && !$('#modal').classList.contains('closing');
   clearTimeout(modalCloseTimer); $('#modal').classList.remove('closing');
-  $('#toast').classList.remove('show'); $('#sheet').innerHTML = html; $('#modal').hidden = false;
+  $('#toast').classList.remove('show'); $('#sheet').innerHTML = html; $('#sheet').onscroll = null; $('#sheet').classList.toggle('fill', fill); $('#modal').hidden = false;
   // Step to step (options → progress → result): cross-fade the content instead of jumping.
   if (wasOpen) $('#sheet').animate?.([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], { duration: 200, easing: 'ease-out' });
   modalDismissable = dismissable; modalOnDismiss = onDismiss;
@@ -75,6 +77,7 @@ function modal(html: string, dismissable = false, onDismiss: (() => void) | null
 let modalCloseTimer = 0;
 /** Slide/fade out, then hide. A new modal() during the animation cancels it. */
 function closeModal() {
+  closePicker?.();
   modalDismissable = false; modalOnDismiss = null;
   const m = $('#modal');
   if (m.hidden || m.classList.contains('closing')) return;
@@ -147,6 +150,7 @@ async function loadFile(file: OpenedFile) {
   S.bytes = file.bytes;
   S.password = password;
   S.verified = null;
+  docExport = null;
   S.applied = [];
   S.sizes = await pageSizes(doc);
   S.boxes = S.sizes.map(() => []);
@@ -216,6 +220,7 @@ function confirmLeave(onYes: () => void) {
 
 /** Android Back: close dialog → stop a scan (asks) → close panel → leave document (asking if unsaved) → let the OS handle it. */
 function handleBack(): boolean {
+  if (closePicker) { closePicker(); return true; }
   if (dismissModal()) return true;
   if (S.scan) { askStopScan(); return true; }
   if (S.busy) return true;
@@ -563,7 +568,22 @@ type ThemePref = 'system' | 'light' | 'dark';
 interface ExportPrefs { dpi: number; compression: ExportOptions['format']; searchable: boolean; method: 'vector' | 'image' }
 interface Options { hideRecents: boolean; platesLabelled: boolean; confirmLeave: boolean; closeAfterRedact: boolean; reviewReminder: boolean }
 const DEFAULT_OPTIONS: Options = { hideRecents: true, platesLabelled: true, confirmLeave: true, closeAfterRedact: true, reviewReminder: true };
-interface Prefs { theme: ThemePref; advanced: boolean; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[]; always: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
+interface Prefs { theme: ThemePref; advanced: boolean; ocrLangs: string[]; detect: { enabled: string[]; custom: CustomPattern[]; known?: string[]; always: string[] }; export: ExportPrefs; opts: Options; ui: UiPrefs }
+/** Languages in scans (Settings → one switch each). Add a language here, and a model that reads it below. */
+const OCR_LANGS = [
+  { id: 'en', label: 'English', hint: 'Also Malay and other text in the Latin alphabet.' },
+  { id: 'zh', label: '中文', hint: 'Simplified and Traditional Chinese, and English in the same scan. Scanned pages take a little longer to read.' },
+] as const;
+/** Recognition models, fastest first, with the languages each reads: the first that reads every language switched on is used. */
+const OCR_MODELS: { model: OcrLang; reads: string[] }[] = [{ model: 'en', reads: ['en'] }, { model: 'ch', reads: ['en', 'zh'] }];
+const ocrModelFor = (langs: readonly string[]): OcrLang =>
+  (OCR_MODELS.find((m) => langs.every((l) => m.reads.includes(l))) ?? OCR_MODELS[OCR_MODELS.length - 1]).model;
+/** Known languages in table order, at least one (English when none). 1.2 dev builds saved `ocrLang: 'ch'` for English + 中文. */
+function cleanOcrLangs(v: Partial<Prefs> & { ocrLang?: unknown }): string[] {
+  const raw = Array.isArray(v.ocrLangs) ? v.ocrLangs : v.ocrLang === 'ch' ? ['en', 'zh'] : [];
+  const out = OCR_LANGS.map((l) => l.id).filter((id) => raw.includes(id));
+  return out.length ? out : ['en'];
+}
 /** Landscape side panel: which side, and its width in % of the screen (20–45). */
 interface UiPrefs { panelSide: 'left' | 'right'; panelW: number }
 const clampPanelW = (w: number) => Math.min(45, Math.max(20, Math.round(w)));
@@ -584,7 +604,7 @@ function cleanAlways(v: unknown): string[] {
 }
 function loadPrefs(): Prefs {
   const d: Prefs = {
-    theme: 'system', advanced: false, detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id), always: [] },
+    theme: 'system', advanced: false, ocrLangs: ['en'], detect: { enabled: [...DEFAULT_PRESET_IDS], custom: [], known: PRESETS.map((p) => p.id), always: [] },
     export: { dpi: DEFAULT_EXPORT.dpi, compression: DEFAULT_EXPORT.format, searchable: true, method: 'vector' },
     opts: { ...DEFAULT_OPTIONS },
     ui: { panelSide: 'right', panelW: 34 },
@@ -595,6 +615,7 @@ function loadPrefs(): Prefs {
     return {
       theme: v.theme === 'light' || v.theme === 'dark' ? v.theme : 'system',
       advanced: v.advanced === true,
+      ocrLangs: cleanOcrLangs(v),
       opts: (() => {
         const raw = (v.opts ?? {}) as unknown as Record<string, unknown>;
         const o = { ...DEFAULT_OPTIONS };
@@ -633,39 +654,350 @@ host.onInsets((i) => {
 });
 applyTheme();
 host.setSecure(prefs.opts.hideRecents);
+setOcrLang(ocrModelFor(prefs.ocrLangs));
 
-const OPTION_ROWS: [keyof Options, string, string][] = [
-  ['closeAfterRedact', 'Close Auto Detect after Redact', 'Go straight back to the document. Reopen Auto Detect to review or undo items in its Redacted tab. Find always stays open.'],
-  ['confirmLeave', 'Ask before leaving unsaved work', 'Back or opening another file asks first if your redactions aren\'t exported.'],
-  ['reviewReminder', 'Remind me to check every page', 'Shows a reminder when exporting. Auto Detect can miss unusual formats.'],
-  ['platesLabelled', 'Vehicle plates only when labelled', 'Only flag plates next to words like “vehicle”, “kenderaan” or “plate”. Fewer false matches.'],
-  ['hideRecents', 'Hide content in Recent apps', 'Blanks the app preview in the app switcher. This also blocks screenshots.'],
-];
+const OPTION_ROWS: Record<keyof Options, [string, string]> = {
+  closeAfterRedact: ['Close Auto Detect after Redact', 'Go straight back to the document. Reopen Auto Detect to review or undo items in its Redacted tab. Find always stays open.'],
+  confirmLeave: ['Ask before leaving unsaved work', 'Back or opening another file asks first if your redactions aren\'t exported.'],
+  reviewReminder: ['Remind me to check every page', 'Shows a reminder when exporting. Auto Detect can miss unusual formats.'],
+  platesLabelled: ['Vehicle plates only when labelled', 'Only flag plates next to words like “vehicle”, “kenderaan” or “plate”. Fewer false matches.'],
+  hideRecents: ['Hide content in Recent apps', 'Blanks the app preview in the app switcher. This also blocks screenshots.'],
+};
+const optRows = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android').map((k) =>
+  row2(OPTION_ROWS[k][0], `<input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}>`, `opt-${k}`, OPTION_ROWS[k][1])).join('');
+
+// ---------- (?) help ----------
+/** Longer explanations behind the (?) buttons. */
+const HELP = {
+  detect: `<p>Auto Detect scans every page, scanned ones too, for IC numbers, phone numbers, emails, bank accounts, addresses, labelled names and more. Nothing is blacked out until you tap Redact, and you can untick anything first.</p>
+    <p>Words in “Always redact” (Settings) are found in any case, even when split across lines. To pick which types it looks for, or add your own pattern, open Auto Detect in a document and tap “Choose what to find”.</p>
+    <p>It can miss unusual formats, so always look through every page.</p>`,
+  get defaults() { return `<p>What Export starts with. You can still change it each time you export.</p>${this.export}`; },
+  ocr: `<p>Scanned pages are pictures, so Umbra reads them on your device (OCR) before Find, Auto Detect or a searchable export can use the text. Nothing is uploaded.</p>
+    <p>Each extra language makes scanned pages a little slower to read. Chinese covers Simplified and Traditional, and also reads English.</p>`,
+  export: `<p>Every copy goes through a final safety check before you can save it: no hidden text, links, forms, attachments or file details, and nothing readable under the black boxes. If anything fails, Umbra won't save it.</p>
+    <p><b>Keep original text</b> edits the PDF itself, so it looks like the original, stays sharp and small. If the PDF has hidden text or layers, Umbra stops and asks you to use Image only.</p>
+    <p><b>Image only</b> redraws every page as a picture, so nothing from the original file can survive. Files are bigger and the text is only searchable with OCR.</p>`,
+  image: `<p><b>Quality</b> is the picture resolution. 300 DPI suits most documents, 150 makes small files, 600 is for printing.</p>
+    <p><b>File size</b>: Auto picks per page (lossless for clean pages, JPEG for photos and scans). Sharp is always lossless. Photo is always JPEG.</p>
+    <p><b>Searchable text</b> reads the visible words on your device and adds them invisibly, so you can copy and search them. Blacked-out parts are never included.</p>`,
+  split: `<p>Splitting happens after the safety check, so every file is cut from your checked, redacted copy, never from the original.</p>
+    <p><b>Every N</b>: a new file every N pages (1 = one file per page).</p>
+    <p><b>Ranges</b>: one file per range, for example 1-3, 4, 8- (8- means 8 to the end). Pages not listed are left out.</p>
+    <p><b>Halves</b>: for scans with two pages side by side. You get one PDF with every page cut in two.</p>`,
+  find: `<p>Search for any word or phrase. Each search stays as a filter you can remove with ×. Match case and Whole word narrow the results.</p>
+    <p>Scanned pages are read with OCR first, so the first search on a scan can take longer.</p>`,
+};
+type HelpId = keyof typeof HELP;
+const helpBtn = (id: string, what: string) => `<button type="button" class="qhelp" data-help="${id}" aria-expanded="false" aria-label="About ${what.replace(/<[^>]*>/g, '')}">?</button>`;
+const helpBox = (id: string, html = HELP[id as HelpId]) => `<div class="helpbox" data-helpbox="${id}" hidden>${html}</div>`;
+/** A labelled control; its description stays behind a (?) so the screen stays clean. */
+const row2 = (title: string, control: string, id: string, help?: string, forId?: string) =>
+  `<label class="row2"${forId ? ` for="${forId}"` : ''}><span class="rt">${title}${help ? helpBtn(id, title) : ''}</span>${control}</label>${help ? helpBox(id, `<p>${help}</p>`) : ''}`;
+/** A heading with a (?) that opens the longer explanation right under it. */
+const helpH = (tag: 'h2' | 'h3', title: string, id: HelpId) => `<${tag} class="hh">${title}${helpBtn(id, title)}</${tag}>${helpBox(id)}`;
+const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+/**
+ * Starts gently, then glides in. The old curve (.2, .8, .2, 1) moved 15% of the way in the first frame on a
+ * 120 Hz phone, which read as a jolt at the start of every slide.
+ */
+const EASE = 'cubic-bezier(.2, 0, 0, 1)';
+/** Its children's margins stay inside it, so its height while animating is the height it ends with (no jump at the end). */
+function contain(el: HTMLElement) {
+  for (const e of [el, el.parentElement]) {
+    // The parent too: otherwise a margin next to `el` overlaps the parent's own once `el` is gone, but not while it shrinks.
+    if (e && !e.hidden && !e.classList.contains('contain') && getComputedStyle(e).display === 'block') e.classList.add('contain');
+  }
+}
+/**
+ * Bottom margin for a slid-away box: gone, the margins above and below it overlap (collapse) into the larger
+ * one; at zero height it still keeps them apart. This pulls them together so the last frame matches.
+ */
+function goneMargin(el: HTMLElement): string {
+  const pd = el.parentElement ? getComputedStyle(el.parentElement).display : '';
+  if (/flex|grid/.test(pd)) return '0px';
+  const near = (e: Element | null, next: boolean): Element | null => { while (e && (e as HTMLElement).hidden) e = next ? e.nextElementSibling : e.previousElementSibling; return e; };
+  const prev = near(el.previousElementSibling, false), next = near(el.nextElementSibling, true);
+  const pm = prev ? Math.max(0, parseFloat(getComputedStyle(prev).marginBottom) || 0) : 0;
+  const nm = next ? Math.max(0, parseFloat(getComputedStyle(next).marginTop) || 0) : 0;
+  // A border never animates below 1 px (Chrome), so its box keeps them at height 0: pull them back too.
+  const cs = getComputedStyle(el), bw = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+  return `${-Math.min(pm, nm) - bw}px`;
+}
+/** Run a height animation on `el` (border-box, clipped), then hand it back to normal layout. */
+function animateHeight(el: HTMLElement, frames: Keyframe[], duration: number, done?: () => void) {
+  el.classList.add('sliding');
+  const a = el.animate(frames, { duration, easing: EASE });
+  a.onfinish = () => { el.classList.remove('sliding'); done?.(); };
+  a.oncancel = () => el.classList.remove('sliding');
+  return a;
+}
+/** Show or hide with a short height + fade, so what's below slides instead of jumping. `instant` for first render. */
+function slide(el: HTMLElement, show: boolean, instant = false) {
+  if ((el.dataset.slide ?? String(!el.hidden)) === String(show)) return;
+  el.dataset.slide = String(show);
+  el.getAnimations?.().forEach((a) => a.cancel());
+  contain(el);
+  if (instant || reduceMotion?.matches || !el.animate) { el.hidden = !show; contain(el); return; }
+  el.hidden = false;
+  contain(el);
+  const cs = getComputedStyle(el);
+  const full = { height: `${el.offsetHeight}px`, opacity: 1, marginTop: cs.marginTop, marginBottom: cs.marginBottom, paddingTop: cs.paddingTop, paddingBottom: cs.paddingBottom };
+  const none = { height: '0px', opacity: 0, marginTop: '0px', marginBottom: goneMargin(el), paddingTop: '0px', paddingBottom: '0px' };
+  animateHeight(el, show ? [none, full] : [full, none], 300, () => { if (!show) el.hidden = true; });
+}
+/**
+ * One box in place of another (Split's ways): the box keeps its place and changes height while the new
+ * options fade in, instead of one box closing while another opens. To or from nothing, it slides.
+ */
+function swapBox(boxes: HTMLElement[], on: HTMLElement | null, instant = false) {
+  const cur = boxes.find((b) => (b.dataset.slide ?? String(!b.hidden)) === 'true') ?? null;
+  if (cur === on) return;
+  if (!cur || !on || instant || reduceMotion?.matches || !on.animate) { for (const b of boxes) slide(b, b === on, instant); return; }
+  // Mid-animation the old box's current height is where the new one starts.
+  const h0 = cur.getBoundingClientRect().height;
+  cur.getAnimations().forEach((a) => a.cancel());
+  cur.hidden = true; cur.dataset.slide = 'false';
+  on.getAnimations().forEach((a) => a.cancel());
+  on.querySelectorAll<HTMLElement>(':scope > *').forEach((c) => c.getAnimations().forEach((a) => a.cancel()));
+  on.hidden = false; on.dataset.slide = 'true';
+  contain(on);
+  const h1 = on.offsetHeight;
+  animateHeight(on, [{ height: `${h0}px` }, { height: `${h1}px` }], 300);
+  on.querySelectorAll<HTMLElement>(':scope > *').forEach((c) =>
+    c.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 220, delay: 70, easing: 'ease-out', fill: 'backwards' }));
+}
+// ---------- Pickers ----------
+// A <select> opens the system's old-style list on Android. Each one in a sheet gets a button that opens an
+// in-app menu instead; the hidden <select> still holds the value and fires `change`, so callers don't change.
+/** "High (recommended) · 300 DPI" → title "High", sub "recommended", meta "300 DPI"; "Sharp (lossless, larger)" → sub "lossless, larger". */
+function optionParts(text: string): { title: string; sub: string; meta: string } {
+  const [head, meta = ''] = text.split(' · ');
+  const m = /^(.*\S)\s*\(([^)]*)\)$/.exec(head);
+  return m ? { title: m[1], sub: m[2], meta } : { title: head, sub: '', meta };
+}
+/** What the closed picker shows: short enough for one line ("High · 300 DPI", "Auto (smallest file)"). */
+const pickLabel = (text: string) => { const { title, sub, meta } = optionParts(text); return meta ? `${title} · ${meta}` : sub ? `${title} (${sub})` : title; };
+const ICON_CHEV = '<svg class="ico" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg>';
+const ICON_TICK = '<svg class="ico" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+let closePicker: (() => void) | null = null;
+function enhanceSelects(root: ParentNode) {
+  root.querySelectorAll<HTMLSelectElement>('select:not([data-picker])').forEach((sel) => {
+    sel.dataset.picker = '1';
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'pick'; btn.setAttribute('aria-haspopup', 'listbox'); btn.setAttribute('aria-expanded', 'false');
+    const show = () => { btn.innerHTML = `<span>${esc(pickLabel(sel.selectedOptions[0]?.text ?? ''))}</span>${ICON_CHEV}`; };
+    show();
+    sel.before(btn); // first in its label, so tapping the label opens the menu
+    sel.addEventListener('change', show);
+    btn.onclick = (e) => { e.preventDefault(); openPicker(sel, btn); };
+  });
+}
+function openPicker(sel: HTMLSelectElement, btn: HTMLButtonElement) {
+  closePicker?.();
+  const catcher = document.createElement('div');
+  catcher.className = 'pick-catch';
+  const menu = document.createElement('div');
+  menu.className = 'pick-menu'; menu.setAttribute('role', 'listbox');
+  menu.innerHTML = [...sel.options].map((o, i) => {
+    const { title, sub, meta } = optionParts(o.text);
+    return `<button type="button" role="option" data-i="${i}" aria-selected="${o.selected}">
+      <span class="pt"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${meta ? `<span class="pm">${esc(meta)}</span>` : ''}<span class="pk">${o.selected ? ICON_TICK : ''}</span></button>`;
+  }).join('');
+  document.body.append(catcher, menu);
+  // Under the button, right-aligned to it; above it when there isn't room below.
+  const r = btn.getBoundingClientRect(), vw = innerWidth, vh = innerHeight;
+  const w = Math.min(vw - 24, Math.max(r.width, 300));
+  menu.style.width = `${w}px`;
+  menu.style.left = `${Math.max(12, Math.min(r.right - w, vw - 12 - w))}px`;
+  const h = menu.offsetHeight, below = r.bottom + 6 + h <= vh - 12;
+  menu.style.top = `${below ? r.bottom + 6 : Math.max(12, r.top - 6 - h)}px`;
+  menu.style.transformOrigin = below ? 'top right' : 'bottom right';
+  btn.setAttribute('aria-expanded', 'true');
+  if (!reduceMotion?.matches) menu.animate?.([{ opacity: 0, transform: 'scale(.92)' }, { opacity: 1, transform: 'none' }], { duration: 160, easing: 'cubic-bezier(.2, 0, 0, 1)' });
+  const done = () => {
+    if (closePicker !== done) return;
+    closePicker = null; btn.setAttribute('aria-expanded', 'false'); catcher.remove();
+    const a = reduceMotion?.matches ? null : menu.animate?.([{ opacity: 1 }, { opacity: 0, transform: 'scale(.96)' }], { duration: 110, easing: 'ease-in' });
+    if (a) a.onfinish = () => menu.remove(); else menu.remove();
+  };
+  closePicker = done;
+  // Closes on the tap's click, which the catcher swallows: closing on pointerdown let the click through to
+  // the picker's own button underneath, which opened the menu again.
+  catcher.onpointerdown = (e) => e.preventDefault();
+  catcher.onclick = (e) => { e.preventDefault(); e.stopPropagation(); done(); };
+  menu.onclick = (e) => {
+    const o = (e.target as HTMLElement).closest<HTMLElement>('[data-i]');
+    if (!o) return;
+    const i = Number(o.dataset.i);
+    menu.querySelectorAll('[data-i]').forEach((b) => { b.setAttribute('aria-selected', String(b === o)); b.querySelector('.pk')!.innerHTML = b === o ? ICON_TICK : ''; });
+    if (sel.selectedIndex !== i) { sel.selectedIndex = i; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    setTimeout(done, 90); // let the tick show
+  };
+  menu.querySelector<HTMLElement>('[aria-selected="true"]')?.focus({ preventScroll: true });
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && closePicker) { e.stopPropagation(); closePicker(); } }, true);
+
+document.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-help]');
+  const box = b?.closest('.sheet, #panel')?.querySelector<HTMLElement>(`[data-helpbox="${b.dataset.help}"]`);
+  if (!b || !box) return;
+  e.preventDefault();
+  const open = b.getAttribute('aria-expanded') !== 'true';
+  slide(box, open);
+  b.setAttribute('aria-expanded', String(open));
+});
+
+// ---------- Fluid toggles ----------
+// Segmented controls (2 or 3 ways, Scroll | Redact, result tabs) get one sliding highlight, and every
+// toggle can be dragged: the thumb follows the finger and snaps to the nearest option when let go.
+const SEGS = '.segctl, .subtabs, #mode-seg';
+const segOn = (b: Element) => b.getAttribute('aria-pressed') === 'true' || b.getAttribute('aria-selected') === 'true';
+const segButtons = (g: HTMLElement) => [...g.children].filter((c): c is HTMLButtonElement => c instanceof HTMLButtonElement);
+function syncSeg(g: HTMLElement) {
+  if (g.classList.contains('seg-drag')) return;
+  const b = segButtons(g).find(segOn);
+  g.style.setProperty('--seg-o', b && b.offsetWidth ? '1' : '0');
+  if (!b || !b.offsetWidth) return;
+  g.style.setProperty('--seg-x', `${b.offsetLeft}px`);
+  g.style.setProperty('--seg-w', `${b.offsetWidth}px`);
+  if (!g.classList.contains('seg-ready')) requestAnimationFrame(() => g.classList.add('seg-ready')); // no slide on first paint
+}
+const segSize = new ResizeObserver((es) => es.forEach((e) => syncSeg(e.target as HTMLElement)));
+const segSeen = new WeakSet<HTMLElement>();
+function scanSegs(root: ParentNode = document) {
+  root.querySelectorAll<HTMLElement>(SEGS).forEach((g) => {
+    if (!segSeen.has(g)) { segSeen.add(g); g.classList.add('fluid'); segSize.observe(g); }
+    syncSeg(g);
+  });
+}
+new MutationObserver((ms) => {
+  for (const m of ms) {
+    if (m.type === 'attributes') { const g = (m.target as HTMLElement).parentElement?.closest<HTMLElement>(SEGS); if (g) syncSeg(g); }
+    else m.addedNodes.forEach((n) => { if (n instanceof HTMLElement) { const g = n.closest<HTMLElement>(SEGS); if (g) scanSegs(g.parentElement ?? g); else scanSegs(n); } });
+  }
+}).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-pressed', 'aria-selected', 'hidden'] });
+scanSegs();
+
+let dragClickBlock = false;
+// A drag ends with a click on whatever is under the finger: swallow that one click, the drag already chose.
+document.addEventListener('click', (e) => { if (dragClickBlock) { e.stopPropagation(); e.preventDefault(); } }, true);
+const blockNextClick = () => { dragClickBlock = true; setTimeout(() => { dragClickBlock = false; }, 0); };
+{
+  let g: HTMLElement | null = null, sw: HTMLInputElement | null = null, x0 = 0, base = 0, moved = false, pid = 0;
+  document.addEventListener('pointerdown', (e) => {
+    const t = e.target as HTMLElement;
+    sw = t.closest<HTMLInputElement>('input.switch');
+    g = sw ? null : t.closest<HTMLElement>(SEGS);
+    if (g && !segButtons(g).some(segOn)) g = null;
+    if (!g && !sw) return;
+    x0 = e.clientX; moved = false; pid = e.pointerId;
+    base = sw ? (sw.checked ? 18 : 0) : parseFloat(g!.style.getPropertyValue('--seg-x')) || 0;
+  }, true);
+  document.addEventListener('pointermove', (e) => {
+    if ((!g && !sw) || e.pointerId !== pid) return;
+    const dx = e.clientX - x0;
+    if (!moved && Math.abs(dx) < 6) return;
+    if (!moved) { moved = true; (sw ?? g!).classList.add('seg-drag'); try { (sw ?? g!).setPointerCapture(pid); } catch { /* gone */ } }
+    if (sw) { sw.style.setProperty('--sx', `${Math.min(18, Math.max(0, base + dx))}px`); return; }
+    const bs = segButtons(g!), first = bs[0], last = bs[bs.length - 1];
+    const w = parseFloat(g!.style.getPropertyValue('--seg-w')) || first.offsetWidth;
+    const x = Math.min(last.offsetLeft + last.offsetWidth - w, Math.max(first.offsetLeft, base + dx));
+    g!.style.setProperty('--seg-x', `${x}px`);
+    // The option under the highlight's middle takes its width as it passes.
+    const mid = x + w / 2, near = bs.find((b) => mid >= b.offsetLeft && mid <= b.offsetLeft + b.offsetWidth) ?? first;
+    g!.style.setProperty('--seg-w', `${near.offsetWidth}px`);
+  });
+  const end = (e: PointerEvent) => {
+    if ((!g && !sw) || e.pointerId !== pid) return;
+    const el = sw ?? g!;
+    const was = moved; const s2 = sw, g2 = g;
+    g = sw = null;
+    el.classList.remove('seg-drag');
+    if (!was) return;
+    blockNextClick();
+    if (e.type === 'pointercancel' && !s2) { syncSeg(g2!); return; }
+    if (s2) {
+      const on = (parseFloat(s2.style.getPropertyValue('--sx')) || 0) >= 9;
+      s2.style.removeProperty('--sx');
+      if (on !== s2.checked) { s2.checked = on; s2.dispatchEvent(new Event('change', { bubbles: true })); }
+      return;
+    }
+    const x = (parseFloat(g2!.style.getPropertyValue('--seg-x')) || 0) + (parseFloat(g2!.style.getPropertyValue('--seg-w')) || 0) / 2;
+    const bs = segButtons(g2!);
+    const pick = bs.reduce((a, b) => (Math.abs(b.offsetLeft + b.offsetWidth / 2 - x) < Math.abs(a.offsetLeft + a.offsetWidth / 2 - x) ? b : a));
+    if (!pick.disabled && !segOn(pick)) { dragClickBlock = false; pick.click(); blockNextClick(); }
+    syncSeg(g2!);
+  };
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
+}
 
 function settingsDialog() {
   if (S.busy) return;
   const seg = (v: ThemePref, l: string) => `<button data-theme-opt="${v}" aria-pressed="${prefs.theme === v}">${l}</button>`;
-  modal(`<h2>Settings</h2>
-    <h3>Appearance</h3>
-    <div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div>
-    <h3>Preferences</h3>
-    ${OPTION_ROWS.filter(([k]) => k !== 'hideRecents' || host.name === 'android').map(([k, t, h]) => `<label class="row2"><span>${t}<small class="hint">${h}</small></span>
-      <input class="switch" type="checkbox" data-opt="${k}" ${prefs.opts[k] ? 'checked' : ''}></label>`).join('')}
-    <h3>Always redact</h3>
-    <p class="hint">Names, places or other words Auto Detect should always find, in any case and across line breaks. Kept on this device only.</p>
+  const optItems = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android')
+    .map((k) => `<div class="sitem">${optRows([k])}</div>`).join('');
+  // Laid out like Export (a full-height sheet, `fill`): only the content moves when a section opens or closes.
+  modal(`<div class="fillbody"><div class="ssearch"><h2>Settings</h2><input id="s-search" type="search" placeholder="Search settings" autocomplete="off" spellcheck="false" enterkeyhint="search" aria-label="Search settings"></div>
+    <p class="hint" id="s-none" hidden>No settings match.</p>
+    <section class="sset"><h3>Appearance</h3>
+    <div class="sitem" data-k="theme dark light mode night colour color"><div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div></div></section>
+    <section class="sset">${helpH('h3', 'Export defaults', 'defaults')}
+    <div class="sitem" data-k="save method">${exportChoiceHtml(prefs.export)}</div></section>
+    <section class="sset">${helpH('h3', 'Auto Detect', 'detect')}
+    <div class="sitem" data-k="words names list">${row2('Always redact', '', 'always', 'Names, places or other words Auto Detect should always find, in any case and across line breaks. Kept on this device only.', 's-aw')}
     <form class="prow" id="s-aw-form"><input id="s-aw" placeholder="Word or phrase, e.g. Tan Ah Kow" autocomplete="off" spellcheck="false" maxlength="200" enterkeyhint="done">
       <button class="primary">Add</button></form>
-    <div class="tchips" id="s-aw-list"></div>
-    <h3>Advanced</h3>
-    <label class="row2"><span>Show technical check report<small class="hint">For IT and troubleshooting. The safety check always runs either way.</small></span>
-      <input id="s-adv" class="switch" type="checkbox" ${prefs.advanced ? 'checked' : ''}></label>
-    <h3>About</h3>
-    <p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p>
-    <div class="row"><button id="s-close" class="primary">Done</button></div>`, true);
+    <div class="tchips" id="s-aw-list"></div></div>
+    ${optItems(['platesLabelled', 'closeAfterRedact'])}</section>
+    <section class="sset">${helpH('h3', 'Reading scans (OCR)', 'ocr')}
+    ${OCR_LANGS.map((l) => `<div class="sitem" data-k="language ${l.id === 'zh' ? 'chinese' : 'malay'}">${row2(l.label, `<input class="switch" type="checkbox" data-lang="${l.id}" ${prefs.ocrLangs.includes(l.id) ? 'checked' : ''}>`, `lang-${l.id}`, l.hint)}</div>`).join('')}
+    <p class="hint" id="s-lang-hint" hidden>Keep at least one language on.</p></section>
+    <section class="sset"><h3>Safety</h3>
+    ${optItems(['confirmLeave', 'reviewReminder', 'hideRecents'])}</section>
+    <section class="sset"><h3>Advanced</h3>
+    <div class="sitem" data-k="debug">${row2('Show technical check report', `<input id="s-adv" class="switch" type="checkbox" ${prefs.advanced ? 'checked' : ''}>`, 'adv', 'For IT and troubleshooting. The safety check always runs either way.')}</div></section>
+    <section class="sset"><h3>About</h3>
+    <div class="sitem" data-k="version licence privacy"><p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p></div></section></div>
+    <div class="row"><button id="s-close" class="primary">Done</button></div>`, true, null, true);
+  // The title and search stay on top; a line under them once the list scrolls beneath.
+  const sheet = $('#sheet'), head = $('.ssearch');
+  sheet.onscroll = () => head.classList.toggle('stuck', sheet.scrollTop > 4);
+  // Search: only matching settings stay; a section title match keeps its whole section.
+  const sq = $<HTMLInputElement>('#s-search');
+  sq.oninput = () => {
+    const words = sq.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const hit = (t: string) => words.every((w) => t.includes(w));
+    let any = false;
+    $('#sheet').querySelectorAll<HTMLElement>('.sset').forEach((sec) => {
+      const title = sec.querySelector('h3')?.textContent?.toLowerCase() ?? '';
+      const all = !words.length || hit(title);
+      let n = 0;
+      sec.querySelectorAll<HTMLElement>('.sitem').forEach((it) => {
+        const on = all || hit(`${title} ${it.textContent} ${it.dataset.k ?? ''}`.toLowerCase());
+        slide(it, on); if (on) n++;
+      });
+      slide(sec, n > 0); any ||= n > 0;
+    });
+    slide($('#s-none'), !any);
+  };
+  // Saved once the slide has finished: the save crosses to Android, which can cost the slide's first frame.
+  let saveLater = 0;
+  bindExportChoice(prefs.export, () => { clearTimeout(saveLater); saveLater = window.setTimeout(savePrefs, 400); });
   $('#sheet').querySelectorAll<HTMLButtonElement>('[data-theme-opt]').forEach((b) => {
     b.onclick = () => {
       prefs.theme = b.dataset.themeOpt as ThemePref; savePrefs(); applyTheme();
       $('#sheet').querySelectorAll('[data-theme-opt]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+    };
+  });
+  $('#sheet').querySelectorAll<HTMLInputElement>('[data-lang]').forEach((cb) => {
+    cb.onchange = () => {
+      const on = [...$('#sheet').querySelectorAll<HTMLInputElement>('[data-lang]')].filter((x) => x.checked).map((x) => x.dataset.lang!);
+      // Scans need at least one language: the last one can't be switched off.
+      $('#s-lang-hint').hidden = on.length > 0;
+      if (!on.length) { cb.checked = true; return; }
+      prefs.ocrLangs = on; savePrefs(); setOcrLang(ocrModelFor(on));
     };
   });
   const aw = prefs.detect;
@@ -719,21 +1051,69 @@ function updateSheetSpace() {
     return;
   }
   stage.style.setProperty('--side-l', '0px'); stage.style.setProperty('--side-r', '0px');
-  const h = p.hidden || p.classList.contains('closing') ? 0
-    : p.classList.contains('peek') ? parseFloat(getComputedStyle(p).getPropertyValue('--peek-h')) || 64
-    : p.offsetHeight;
+  const h = p.hidden || p.classList.contains('closing') ? 0 : p.offsetHeight - sheetShift(p);
   stage.style.setProperty('--sheet-h', `${Math.round(h)}px`);
 }
-new ResizeObserver(updateSheetSpace).observe($('#panel'));
-sideMode.addEventListener('change', () => { $('#panel').classList.remove('peek'); updateSheetSpace(); });
+new ResizeObserver(() => { if (!sheetDrag) updateSheetSpace(); }).observe($('#panel'));
+sideMode.addEventListener('change', () => setSnap(snap, false));
+new ResizeObserver(() => { if (!$('#panel').hidden && !sheetDrag) setSnap(snap, false); }).observe(stage);
+
+// Bottom sheet stops: just the header, 40% of the screen, or covering the whole document.
+type Snap = 'peek' | 'half' | 'full';
+let snap: Snap = 'half';
+let sheetDrag = false;
+function snapHeights(): Record<Snap, number> {
+  const H = stage.clientHeight;
+  const head = $('#panel').querySelector<HTMLElement>('.phead')?.offsetHeight ?? 64;
+  return { peek: head, half: Math.max(head, Math.round(H * 0.4)), full: H };
+}
+/** How far the sheet is pushed down below its height (it moves by this, so moving never re-lays out its list). */
+const sheetShift = (p: HTMLElement) => parseFloat(p.style.translate.split(' ')[1] ?? '') || 0;
+let settleTimer = 0;
+function setSnap(to: Snap, animate = true) {
+  const p = $('#panel');
+  snap = to;
+  p.dataset.snap = to;
+  if (sideMode.matches) { clearTimeout(settleTimer); p.style.height = ''; p.style.translate = ''; updateSheetSpace(); return; }
+  settleSheet(p, snapHeights()[to], animate);
+}
+/**
+ * Glide the sheet to show `to` px. Only the compositor moves it: the sheet is made tall enough for both the
+ * start and the end, slides with `translate`, and takes its final height once it has stopped.
+ */
+function settleSheet(p: HTMLElement, to: number, animate: boolean) {
+  clearTimeout(settleTimer);
+  const instant = () => {
+    p.classList.add('dragging');
+    p.style.height = `${to}px`; p.style.translate = '';
+    void p.offsetHeight;
+    p.classList.remove('dragging');
+    updateSheetSpace();
+  };
+  const from = p.offsetHeight - sheetShift(p);
+  if (!animate || p.hidden || reduceMotion?.matches || Math.abs(from - to) < 1) { instant(); return; }
+  const H = Math.max(p.offsetHeight, to);
+  p.classList.add('dragging');
+  if (p.offsetHeight !== H) p.style.height = `${H}px`;
+  p.style.translate = `0 ${H - from}px`;
+  void p.offsetHeight;
+  p.classList.remove('dragging');
+  p.style.translate = `0 ${H - to}px`;
+  updateSheetSpace(); // the document and zoom buttons move with it, once
+  settleTimer = window.setTimeout(() => { if (!p.hidden) instant(); }, 360);
+}
 
 function showPanel(html: string) {
   const p = $('#panel');
   const wasOpen = !p.hidden && !p.classList.contains('closing');
   clearTimeout(panelCloseTimer);
-  p.classList.remove('peek', 'closing');
-  p.innerHTML = `<button class="grab" id="p-grab" aria-label="Collapse or expand panel"><i></i></button>${html}`;
-  p.scrollTop = 0;
+  p.classList.remove('closing');
+  p.innerHTML = `<div class="phead"><button class="grab" id="p-grab" aria-label="Collapse or expand panel"><i></i></button></div><div class="pbody">${html}</div>`;
+  // The title bar sits above the scrolling list, so nothing scrolls past it.
+  const ph = p.querySelector<HTMLElement>('.pbody > .ph');
+  if (ph) p.querySelector('.phead')!.append(ph);
+  if (!wasOpen) snap = 'half';
+  setSnap(snap, wasOpen);
   if (wasOpen) {
     // Switching Find <-> Auto Detect: cross-fade the content, the sheet stays put.
     p.animate?.([{ opacity: 0.2 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' });
@@ -747,33 +1127,61 @@ function showPanel(html: string) {
   updateSheetSpace();
 }
 
-/** Tap the handle (or the title) to collapse the panel to its header; drag down/up does the same. */
+/**
+ * Bottom sheet: drag the handle or title bar and it follows the finger, then settles on the nearest stop
+ * (a quick flick carries it on). Tapping the handle or title collapses it, or brings it back to 40%.
+ * Landscape: the handle is the inner edge, dragged to resize.
+ */
 function bindGrab(p: HTMLElement) {
-  const toggle = (force?: boolean) => {
-    const ph = p.querySelector<HTMLElement>('.ph');
-    p.scrollTop = 0;
-    if (ph) p.style.setProperty('--peek-h', `${Math.ceil(ph.getBoundingClientRect().bottom - p.getBoundingClientRect().top) + 4}px`);
-    p.classList.toggle('peek', force);
-    updateSheetSpace();
+  const head = p.querySelector<HTMLElement>('.phead')!;
+  let y0: number | null = null, h0 = 0, cur = 0, moved = false, fromTitle = false, last: [number, number][] = [];
+  head.onpointerdown = (e) => {
+    const t = e.target as HTMLElement;
+    fromTitle = !!t.closest('.ph b, .grab');
+    if (t.closest('button:not(.grab), input, a')) return; // its own buttons still work
+    if (sideMode.matches && !t.closest('.grab')) return;
+    y0 = e.clientY; h0 = cur = p.offsetHeight - sheetShift(p); moved = false; last = [[e.clientY, e.timeStamp]];
+    head.setPointerCapture(e.pointerId);
   };
-  const grab = $('#p-grab');
-  let y0: number | null = null;
-  grab.onpointerdown = (e) => { y0 = e.clientY; grab.setPointerCapture(e.pointerId); };
-  grab.onpointermove = (e) => {
-    if (y0 === null || !sideMode.matches) return;
-    // Side panel: drag the inner edge to resize (20–45% of the screen).
-    const sb = stage.getBoundingClientRect();
-    const px = prefs.ui.panelSide === 'right' ? sb.right - e.clientX : e.clientX - sb.left;
-    prefs.ui.panelW = clampPanelW((px / sb.width) * 100);
-    applyPanelUi(); updateSheetSpace();
-  };
-  grab.onpointerup = (e) => {
+  head.onpointermove = (e) => {
     if (y0 === null) return;
-    const dy = e.clientY - y0; y0 = null;
-    if (sideMode.matches) { savePrefs(); updateSheetSpace(); return; }
-    if (Math.abs(dy) < 8) toggle(); else toggle(dy > 0);
+    if (sideMode.matches) {
+      // Side panel: drag the inner edge to resize (20–45% of the screen).
+      const sb = stage.getBoundingClientRect();
+      const px = prefs.ui.panelSide === 'right' ? sb.right - e.clientX : e.clientX - sb.left;
+      prefs.ui.panelW = clampPanelW((px / sb.width) * 100);
+      applyPanelUi(); updateSheetSpace();
+      return;
+    }
+    if (!moved && Math.abs(e.clientY - y0) < 6) return;
+    const { peek, full } = snapHeights();
+    if (!moved) {
+      // Full height for the whole drag; only `translate` changes while the finger moves.
+      moved = true; sheetDrag = true; clearTimeout(settleTimer); p.classList.add('dragging');
+      h0 = p.offsetHeight - sheetShift(p);
+      p.style.height = `${full}px`;
+      p.style.translate = `0 ${full - h0}px`;
+    }
+    cur = Math.min(full, Math.max(peek, h0 - (e.clientY - y0)));
+    p.style.translate = `0 ${full - cur}px`;
+    last.push([e.clientY, e.timeStamp]); if (last.length > 5) last.shift();
   };
-  p.querySelector<HTMLElement>('.ph b')?.addEventListener('click', () => { if (!sideMode.matches) toggle(); });
+  const end = (e: PointerEvent) => {
+    if (y0 === null) return;
+    y0 = null;
+    if (sideMode.matches) { savePrefs(); updateSheetSpace(); return; }
+    p.classList.remove('dragging'); sheetDrag = false;
+    if (!moved) { if (fromTitle && e.type === 'pointerup') setSnap(snap === 'peek' ? 'half' : 'peek'); return; }
+    // Where a flick would carry it in ~0.2 s, then the nearest stop.
+    const [ya, ta] = last[0], [yb, tb] = last[last.length - 1];
+    const v = tb > ta ? (yb - ya) / (tb - ta) : 0; // px per ms, + = down
+    const aim = cur - v * 200;
+    const hs = snapHeights();
+    const best = (Object.keys(hs) as Snap[]).reduce((a, b) => (Math.abs(hs[b] - aim) < Math.abs(hs[a] - aim) ? b : a));
+    setSnap(best);
+  };
+  head.onpointerup = end;
+  head.onpointercancel = end;
   // Landscape: move the panel to the other side.
   const close = p.querySelector<HTMLElement>('.ph .pc');
   if (close && !p.querySelector('.side-swap')) {
@@ -792,10 +1200,9 @@ function closePanel(animate: boolean | 'replace' = false) {
   clearTimeout(panelCloseTimer);
   if (animate === 'replace') { /* content is swapped by showPanel */ }
   else if (animate && !p.hidden) {
-    p.classList.remove('peek');
     p.classList.add('closing');
     panelCloseTimer = window.setTimeout(() => { p.hidden = true; p.innerHTML = ''; p.classList.remove('closing'); updateSheetSpace(); }, 260);
-  } else { p.classList.remove('closing', 'peek'); p.hidden = true; p.innerHTML = ''; }
+  } else { p.classList.remove('closing'); p.hidden = true; p.innerHTML = ''; }
   updateSheetSpace();
   S.panel = null;
   setSugg([]);
@@ -864,6 +1271,7 @@ function applySugg(list: Sugg[]) {
 function reveal(sg: Sugg) {
   const el = viewer.querySelector<HTMLElement>(`.page[data-i="${sg.page}"]`);
   if (!el) return;
+  if (snap === 'full' && !sideMode.matches) setSnap('half'); // the document has to be visible to show the item
   const r = sg.rects[0];
   const vb = viewer.getBoundingClientRect(), eb = el.getBoundingClientRect();
   viewer.scrollTo({
@@ -1035,7 +1443,7 @@ function stopBackground() {
 function askStopScan() {
   if (!S.scan) return;
   const auto = S.panel === 'detect';
-  modal(`<h2>${auto ? 'Stop auto redaction?' : 'Stop searching?'}</h2>
+  modal(`<h2>${auto ? 'Stop Auto Detect?' : 'Stop searching?'}</h2>
     <p class="hint">Pages already read are kept, so scanning again picks up where it stopped.</p>
     <div class="row"><button id="st-no">Keep going</button><button id="st-yes" class="primary danger">Stop</button></div>`, true);
   $('#st-no').onclick = closeModal;
@@ -1149,12 +1557,11 @@ function openFind() {
   if (!S.doc) return;
   closePanel('replace');
   S.panel = 'find';
-  showPanel(`<div class="ph"><b>Manual find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
+  showPanel(`<div class="ph"><b>Find</b>${helpBtn('find', 'Find')}<button class="pc" id="p-close" aria-label="Close">×</button></div>${helpBox('find')}
     <form class="prow" id="f-form"><input id="f-q" type="search" placeholder="Word or phrase" enterkeyhint="search" autocomplete="off">
       <button class="primary" data-busy>Find</button></form>
     <div class="chips"><button class="chip" id="f-case" aria-pressed="false">Match case</button><button class="chip" id="f-word" aria-pressed="false">Whole word</button></div>
     <div class="tchips" id="f-terms"></div>
-    <p class="hint intro">Each search stays as a filter above. Tap × to remove it. Scanned pages are read with on-device OCR first.</p>
     <div id="p-status" class="hint" role="status"></div><div id="p-results"></div>`);
   $('#p-close').onclick = () => closePanel(true);
   for (const id of ['#f-case', '#f-word']) {
@@ -1186,11 +1593,10 @@ function openDetect() {
   closePanel('replace');
   S.panel = 'detect';
   const dp = prefs.detect;
-  showPanel(`<div class="ph"><b>Auto find &amp; redact</b><button class="pc" id="p-close" aria-label="Close">×</button></div>
+  showPanel(`<div class="ph"><b>Auto Detect</b>${helpBtn('detect', 'Auto Detect')}<button class="pc" id="p-close" aria-label="Close">×</button></div>${helpBox('detect')}
     <div class="prow"><button id="d-go" class="primary" data-busy>Scan document</button></div>
-    <p class="hint intro">Finds IC numbers, phones, emails, accounts, addresses and labelled names. Nothing is redacted until you confirm. Use Find for anything it misses.${dp.always.length ? ` Also finds your ${dp.always.length} “Always redact” word${dp.always.length === 1 ? '' : 's'} from Settings.` : ' Names or places to always redact can be added in Settings on the home screen.'}</p>
     <div id="p-status" class="hint" role="status"></div><div id="p-results"></div>
-    <details id="d-cfg"><summary>Advanced config <small class="hint">· choose detectors, custom patterns</small></summary>
+    <details id="d-cfg"><summary>Choose what to find</summary>
       <div class="grid" id="d-grid"></div>
       <div id="d-form" class="cform" hidden>
         <div class="prow"><input id="d-label" placeholder="Name, e.g. Staff ID" autocomplete="off"></div>
@@ -1247,25 +1653,31 @@ function openDetect() {
 // ---------- Export ----------
 export interface ExportOutcome { bytes: Uint8Array; report: VerifyReport; downscaled: { page: number; dpi: number }[]; ocrWords: number; timings: [string, number][] }
 
-async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: string, f: number) => void, method: 'vector' | 'image' = 'image'): Promise<ExportOutcome> {
+async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: string, f: number, step: ExportStep) => void, method: 'vector' | 'image' = 'image'): Promise<ExportOutcome> {
   if (!S.doc) throw new Error('No document');
   const timings: [string, number][] = [];
   let t0 = performance.now();
   const lap = (name: string) => { const t = performance.now(); timings.push([name, t - t0]); t0 = t; };
-  const res = method === 'vector'
-    ? { bytes: await exportVector(S.bytes!, S.password, S.boxes, onProgress), downscaled: [], ocrWords: 0 }
-    : await exportRedacted(S.doc, S.boxes, opts, onProgress, S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr', scanWords: pt.scanWords })) : undefined);
-  lap(method === 'vector' ? 'Redact (MuPDF)' : 'Build pages');
-  const report = await verifyOutput(res.bytes, onProgress, { searchable: opts.searchable, redactions: S.boxes, mode: method });
+  const boxed = S.boxes.some((b) => b.length);
+  // One bar for the whole export: each step gets its share (roughly its usual time) and the bar never goes back.
+  const [made, structured] = !boxed ? [0.85, 1] : method === 'vector' ? [0.45, 0.65] : [0.8, 0.85];
+  const part = (a: number, b: number, step: ExportStep) => (m: string, f: number) => onProgress(m, a + (b - a) * Math.min(1, Math.max(0, f)), step);
+  const vec = method === 'vector' ? await exportVectorChecked(S.bytes!, S.password, S.boxes, part(0, made, 'make')) : null;
+  const res = vec
+    ? { bytes: vec.bytes, downscaled: [], ocrWords: 0 }
+    : await exportRedacted(S.doc, S.boxes, opts, part(0, made, 'make'), S.texts ? (i) => S.texts!.known(i).then((pt) => ({ words: pageTextWords(pt), layer: pt.source !== 'ocr', scanWords: pt.scanWords })) : undefined);
+  lap(vec ? 'Redact (MuPDF)' : 'Build pages');
+  const report = await verifyOutput(res.bytes, part(made, structured, 'check'), { searchable: opts.searchable, redactions: S.boxes, mode: method });
   lap('Structure check');
-  if (method === 'vector' && S.boxes.some((b) => b.length)) {
+  const under = part(structured, 1, 'check');
+  if (vec && boxed) {
     // Keep original text leaves shapes that are only partly under a box (e.g. text drawn as outlines) in the file,
-    // hidden by the black box. So the same redaction without boxes must show nothing readable where the boxes go.
-    // Always run, and fail closed: the structural checks above only see real text.
-    onProgress('Checking under the black boxes', 1);
+    // hidden by the black box. So the same redaction without boxes (made in the same pass) must show nothing
+    // readable where the boxes go. Always run, and fail closed: the structural checks above only see real text.
+    under('Checking under the black boxes', 0);
     try {
-      const bare = await exportVector(S.bytes!, S.password, S.boxes, () => {}, { blackBoxes: false });
-      report.ocr = await ocrRedactedRegions(bare, S.boxes, onProgress);
+      if (!vec.bare) throw new Error('no copy without boxes');
+      report.ocr = await ocrRedactedRegions(vec.bare, S.boxes, under);
       if (report.ocr.leaks.length) {
         report.ok = false;
         report.issues.push(`Readable content left under ${report.ocr.leaks.length} box(es). Use "Image only" for this file`);
@@ -1275,10 +1687,10 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
       report.issues.push(`Could not check under the black boxes: ${(e as Error).message}`);
     }
     lap('Under-box check');
-  } else if (ocr && S.boxes.some((b) => b.length)) {
+  } else if (ocr && boxed) {
     try {
-      onProgress('Double-checking blacked-out areas', 1);
-      report.ocr = await ocrRedactedRegions(res.bytes, S.boxes, onProgress);
+      under('Double-checking blacked-out areas', 0);
+      report.ocr = await ocrRedactedRegions(res.bytes, S.boxes, under);
       if (report.ocr.leaks.length) {
         report.ok = false;
         report.issues.push(`OCR found text in ${report.ocr.leaks.length} redacted region(s)`);
@@ -1289,11 +1701,15 @@ async function runExport(opts: ExportOptions, ocr: boolean, onProgress: (m: stri
     }
     lap('Black-box check');
   }
+  onProgress('Done', 1, 'check');
   const out = { bytes: res.bytes, report, downscaled: res.downscaled, ocrWords: res.ocrWords, timings };
   // Kept so Split (or Export again) with the same boxes and settings needn't redo the redaction and its checks.
   S.verified = ocr && report.ok ? { key: exportKey(opts, method), out } : null;
   return out;
 }
+
+/** 'make': building the redacted copy; 'check': proving it's safe. */
+type ExportStep = 'make' | 'check';
 
 /** What a redacted copy depends on: the boxes and the export settings that shape it. */
 const exportKey = (opts: ExportOptions, method: 'vector' | 'image') =>
@@ -1302,82 +1718,85 @@ const exportKey = (opts: ExportOptions, method: 'vector' | 'image') =>
 const ICON_OK = '<svg class="ico" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_BAD = '<svg class="ico" viewBox="0 0 24 24"><path d="M12 7v6M12 17h.01"/></svg>';
 
+/** Export choices this document was last exported with; Settings → Export defaults otherwise. Not saved. */
+let docExport: ExportPrefs | null = null;
+
+/** Method + image settings: shared by the Export dialog and Settings → Export defaults (never open together). */
+function exportChoiceHtml(e: ExportPrefs): string {
+  return `<div class="segctl" id="x-method">
+      <button data-m="vector" aria-pressed="${e.method === 'vector'}">Keep original text</button>
+      <button data-m="image" aria-pressed="${e.method === 'image'}">Image only</button></div>
+    <div class="spbox" id="x-image-opts">
+    ${helpH('h3', 'Image settings', 'image')}
+    <label class="row2"><span>Quality</span><select id="x-dpi">
+      ${[[150, 'Small file'], [200, 'Good'], [300, 'High (recommended)'], [400, 'Very high'], [600, 'Print']].map(([d, l]) =>
+        `<option value="${d}"${d === e.dpi ? ' selected' : ''}>${l} · ${d} DPI</option>`).join('')}
+    </select></label>
+    <label class="row2"><span>File size</span><select id="x-fmt">
+      ${([['auto', 'Auto (smallest file)'], ['png', 'Sharp (lossless, larger)'], ['jpeg', 'Photo (JPEG)']] as const).map(([v, l]) =>
+        `<option value="${v}"${e.compression === v ? ' selected' : ''}>${l}</option>`).join('')}
+    </select></label>
+    <label class="row2"><span>Searchable text (OCR)</span>
+      <input id="x-search" class="switch" type="checkbox" ${e.searchable ? 'checked' : ''}></label>
+    </div>`;
+}
+
+/** Wire exportChoiceHtml: every change is written into `e`, then `changed` runs. */
+function bindExportChoice(e: ExportPrefs, changed: () => void) {
+  const show = (instant = false) => {
+    slide($('#x-image-opts'), e.method === 'image', instant);
+    $('#x-method').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === e.method)));
+  };
+  $('#x-method').onclick = (ev) => {
+    const b = (ev.target as HTMLElement).closest<HTMLElement>('[data-m]');
+    if (!b) return;
+    e.method = b.dataset.m as ExportPrefs['method']; show(); changed();
+  };
+  $('#x-dpi').onchange = () => { e.dpi = Number($<HTMLSelectElement>('#x-dpi').value); changed(); };
+  $('#x-fmt').onchange = () => { e.compression = $<HTMLSelectElement>('#x-fmt').value as ExportPrefs['compression']; changed(); };
+  $('#x-search').onchange = () => { e.searchable = $<HTMLInputElement>('#x-search').checked; changed(); };
+  enhanceSelects($('#x-image-opts'));
+  show(true);
+}
+
 function exportDialog() {
   const total = S.boxes.reduce((n, b) => n + b.length, 0);
   const pending = S.sugg.filter((x) => x.on).length;
-  const m0 = prefs.export.method;
-  modal(`<h2>Save a redacted copy</h2>
-    <div class="segctl" id="x-method">
-      <button data-m="vector" aria-pressed="${m0 === 'vector'}">Keep original text</button>
-      <button data-m="image" aria-pressed="${m0 === 'image'}">Image only</button></div>
-    <p class="hint" id="x-desc"></p>
+  const ex: ExportPrefs = { ...(docExport ?? prefs.export) };
+  modal(`<div class="fillbody"><h2>Save a redacted copy</h2>
     ${total ? '' : '<p class="note">Nothing is redacted. That\'s fine: you\'ll still get a cleaned copy, searchable too if OCR is on.</p>'}
     ${pending ? `<p class="fail">${pending} found item(s) aren't redacted yet. Tap "Redact" in the panel first.</p>` : ''}
     ${prefs.opts.reviewReminder && total ? '<p class="note">Before exporting, scroll through every page. Auto Detect and Find can miss unusual formats.</p>' : ''}
-    <div id="x-image-opts">
-    <label class="row2"><span>Quality</span><select id="x-dpi">
-      ${[[150, 'Small file'], [200, 'Good'], [300, 'High (recommended)'], [400, 'Very high'], [600, 'Print']].map(([d, l]) =>
-        `<option value="${d}"${d === prefs.export.dpi ? ' selected' : ''}>${l} · ${d} DPI</option>`).join('')}
-    </select></label>
-    <label class="row2"><span>Compression</span><select id="x-fmt">
-      ${([['auto', 'Auto (smallest file)'], ['png', 'Sharp (lossless, larger)'], ['jpeg', 'Photo (JPEG)']] as const).map(([v, l]) =>
-        `<option value="${v}"${prefs.export.compression === v ? ' selected' : ''}>${l}</option>`).join('')}
-    </select></label>
-    <label class="row2"><span>Keep text selectable &amp; searchable (OCR)
-      <small class="hint">Reads the visible text on your device so you can copy and search it. Blacked-out parts are never included.</small></span>
-      <input id="x-search" class="switch" type="checkbox" ${prefs.export.searchable ? 'checked' : ''}></label>
-    </div>
-    <label class="row2"><span>Split into several files
-      <small class="hint">Per page, by page ranges, or each page cut in half. Pages are cut from the checked copy.</small></span>
-      <input id="x-split" class="switch" type="checkbox"></label>
-    <div id="x-split-opts" hidden>${splitOptionsHtml(S.sizes.length)}</div>
-    <div class="row"><button id="x-cancel">Cancel</button><button id="x-go" class="primary">Continue</button></div>`, true);
-  let method = m0;
-  const splitOn = () => $<HTMLInputElement>('#x-split').checked;
-  const split = bindSplitOptions(S.sizes.length, splitOn, $<HTMLButtonElement>('#x-go'));
-  $('#x-split').onchange = () => { $('#x-split-opts').hidden = !splitOn(); split.refresh(); };
-  const DESC = {
-    vector: 'Recommended. Text, shapes and image parts under your boxes are removed from the file itself; everything else stays as real text, so the copy looks like the original, stays small and is fully searchable.',
-    image: 'Maximum safety. Every page becomes a picture with your boxes burned in and nothing else from the original is kept. Larger files; text is searchable only with OCR.',
-  };
-  const showMethod = () => {
-    $('#x-desc').textContent = DESC[method];
-    $('#x-image-opts').hidden = method !== 'image';
-    $('#x-method').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === method)));
-  };
-  $('#x-method').onclick = (e) => {
-    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]');
-    if (!b) return;
-    method = b.dataset.m as typeof method; showMethod();
-    $('#x-image-opts').animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 180 });
-  };
-  showMethod();
-  // Start loading the redaction engine (~10 MB WASM) while the user reads the dialog.
-  const warm = () => { if (method === 'vector') void loadMuPdf().catch(() => {}); };
+    ${helpH('h3', 'How to remove content', 'export')}
+    ${exportChoiceHtml(ex)}
+    ${helpH('h3', 'Split into files', 'split')}
+    ${splitOptionsHtml(S.sizes.length)}
+    </div><div class="row"><button id="x-cancel">Cancel</button><button id="x-go" class="primary">Continue</button></div>`, true, null, true);
+  const split = bindSplitOptions(S.sizes.length, $<HTMLButtonElement>('#x-go'));
+  // Start loading the redaction engine (~10 MB WASM) while the user reads the dialog, after any animation
+  // (loading it holds this thread for a moment).
+  const warm = () => { if (ex.method === 'vector') setTimeout(() => void loadMuPdf().catch(() => {}), 400); };
+  bindExportChoice(ex, warm);
   warm();
-  $('#x-method').addEventListener('click', warm);
   $('#x-cancel').onclick = closeModal;
   $('#x-go').onclick = async () => {
-    const opts: ExportOptions = {
-      ...DEFAULT_EXPORT,
-      dpi: Number($<HTMLSelectElement>('#x-dpi').value),
-      format: $<HTMLSelectElement>('#x-fmt').value as ExportOptions['format'],
-      searchable: $<HTMLInputElement>('#x-search').checked,
-    };
-    prefs.export = { dpi: opts.dpi, compression: opts.format, searchable: opts.searchable, method }; savePrefs();
-    const spec = splitOn() ? split.spec() : null;
+    const method = ex.method;
+    const opts: ExportOptions = { ...DEFAULT_EXPORT, dpi: ex.dpi, format: ex.compression, searchable: ex.searchable };
+    docExport = ex;
+    const spec = split.spec();
     modal(`<h2>Preparing your copy…</h2><p id="x-msg" class="hint">Starting</p><progress id="x-bar" max="1" value="0"></progress>`);
     S.busy = true; syncToolbar();
     const w = startWork('Preparing your redacted copy');
     try {
+      await painted(); // the redaction engine blocks this thread, so show the progress page before it starts
       const xo: ExportOptions = { ...opts, searchable: method === 'image' && opts.searchable };
       // Exported already with these boxes and settings (e.g. once whole, now split): reuse that checked copy.
       const done = S.verified?.key === exportKey(xo, method) ? S.verified.out : null;
-      const out = done ?? await runExport(xo, true, (m, f) => {
-        const msg = document.getElementById('x-msg'); if (msg && prefs.advanced) msg.textContent = m;
-        else if (msg) msg.textContent = f < 1 ? 'Making the pages…' : 'Checking it\'s safe…';
+      const out = done ?? await runExport(xo, true, (m, f, step) => {
+        const label = step === 'make' ? 'Making the pages' : 'Checking it\'s safe';
+        const msg = document.getElementById('x-msg'); if (msg) msg.textContent = prefs.advanced ? m : `${label}…`;
         const bar = document.getElementById('x-bar') as HTMLProgressElement | null; if (bar) bar.value = f;
-        w.progress(f < 1 ? 'Making the pages' : 'Checking it\'s safe', f);
+        w.progress(label, f);
       }, method);
       if (out.report.ok && spec) {
         // Never cut the original: only the redacted copy that just passed the safety check.
@@ -1397,6 +1816,17 @@ function exportDialog() {
       S.busy = false; syncToolbar();
     }
   };
+}
+
+/**
+ * Resolves once the page has drawn what was just put on screen: after the next frame, or after 150 ms if no
+ * frame comes (a still screen on Android can stop sending frames), so work that follows never waits on one.
+ */
+function painted(): Promise<void> {
+  return new Promise((r) => {
+    const t = setTimeout(r, 150);
+    requestAnimationFrame(() => setTimeout(() => { clearTimeout(t); r(); }, 0));
+  });
 }
 
 /** Export threw (nothing was saved): say why, and what to do. */
@@ -1474,45 +1904,42 @@ const sizeText = (n: number) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB`
 function splitOptionsHtml(n: number): string {
   const L = lastSplit;
   return `<div class="segctl" id="sp-mode">
-      <button data-m="every">Per page</button><button data-m="ranges">Ranges</button><button data-m="half">Halves</button></div>
-    <div id="sp-every">
-      <label class="row2"><span>Pages in each file</span><input id="sp-n" type="number" min="1" max="${n}" value="${Math.min(L.every, n)}" inputmode="numeric" style="width:6em"></label>
+      <button data-m="none">One file</button><button data-m="every">Every N</button><button data-m="ranges">Ranges</button><button data-m="half">Halves</button></div>
+    <div class="spbox" id="sp-every">
+      <label class="row2"><span>Pages in each file</span>
+        <input id="sp-n" type="number" min="1" max="${n}" value="${Math.min(L.every, n)}" inputmode="numeric" style="width:6em"></label>
     </div>
-    <div id="sp-ranges">
-      <p class="hint">One file per range, for example <b>1-3, 4, 8-</b> (8- means 8 to the end). Pages not listed are left out.</p>
-      <input id="sp-r" placeholder="1-3, 4, 8-" autocomplete="off" spellcheck="false" inputmode="text" enterkeyhint="done" value="${esc(L.ranges)}" style="width:100%">
+    <div class="spbox" id="sp-ranges">
+      <label class="row2" for="sp-r"><span>Page ranges</span></label>
+      <input id="sp-r" placeholder="e.g. 1-3, 4, 8-" autocomplete="off" spellcheck="false" inputmode="text" enterkeyhint="done" value="${esc(L.ranges)}" style="width:100%">
     </div>
-    <div id="sp-half">
-      <p class="hint">For scans with two pages side by side. You get one PDF with every page cut in two.</p>
+    <div class="spbox" id="sp-half">
       <div class="segctl" id="sp-cut"><button data-c="lr">Left | Right</button><button data-c="tb">Top / Bottom</button></div>
-      <label class="row2"><span>Only cut pages that are wider than tall
-        <small class="hint">A cover or single page in the scan stays whole.</small></span>
-        <input id="sp-wide" class="switch" type="checkbox" ${L.widerOnly ? 'checked' : ''}></label>
-      <label class="row2" id="sp-rtl-row"><span>Right page first
-        <small class="hint">For books read right to left.</small></span>
-        <input id="sp-rtl" class="switch" type="checkbox" ${L.rtl ? 'checked' : ''}></label>
+      ${row2('<span id="sp-wide-t">Only cut pages that are wider than tall</span>', `<input id="sp-wide" class="switch" type="checkbox" ${L.widerOnly ? 'checked' : ''}>`, 'sp-wide', 'A cover or single page in the scan stays whole.')}
+      <div id="sp-rtl-row">${row2('Right page first', `<input id="sp-rtl" class="switch" type="checkbox" ${L.rtl ? 'checked' : ''}>`, 'sp-rtl', 'For books read right to left.')}</div>
     </div>
     <p class="note" id="sp-plan"></p>`;
 }
 
-/** Wire the split options; `go` is disabled while they don't make sense. Returns the chosen split. */
-function bindSplitOptions(n: number, active: () => boolean, go: HTMLButtonElement): { spec: () => SplitSpec; refresh: () => void } {
-  let mode = lastSplit.mode, cut = lastSplit.cut;
-  const spec = (): SplitSpec => mode === 'every'
+/** Wire the split options; `go` is disabled while they don't make sense. `spec()` is null for one file. */
+function bindSplitOptions(n: number, go: HTMLButtonElement): { spec: () => SplitSpec | null } {
+  let mode: SplitSpec['mode'] | 'none' = 'none', cut = lastSplit.cut;
+  const spec = (): SplitSpec | null => mode === 'none' ? null : mode === 'every'
     ? { mode, every: Math.max(1, Math.min(n, Math.floor(Number($<HTMLInputElement>('#sp-n').value) || 1))) }
     : mode === 'ranges' ? { mode, ranges: $<HTMLInputElement>('#sp-r').value }
     : { mode, cut, rtl: cut === 'lr' && $<HTMLInputElement>('#sp-rtl').checked, widerOnly: $<HTMLInputElement>('#sp-wide').checked };
-  const show = () => {
-    for (const m of ['every', 'ranges', 'half']) $(`#sp-${m}`).hidden = m !== mode;
+  const show = (instant = false) => {
+    swapBox(['every', 'ranges', 'half'].map((m) => $(`#sp-${m}`)), mode === 'none' ? null : $(`#sp-${mode}`), instant);
     $('#sp-mode').querySelectorAll<HTMLElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === mode)));
     $('#sp-cut').querySelectorAll<HTMLElement>('[data-c]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.c === cut)));
-    $('#sp-rtl-row').hidden = cut !== 'lr';
-    $('#sp-wide').closest('label')!.querySelector('span')!.firstChild!.textContent = cut === 'lr' ? 'Only cut pages that are wider than tall' : 'Only cut pages that are taller than wide';
+    slide($('#sp-rtl-row'), cut === 'lr', instant);
+    $('#sp-wide-t').textContent = cut === 'lr' ? 'Only cut pages that are wider than tall' : 'Only cut pages that are taller than wide';
     const plan = $('#sp-plan');
     let ok = true;
     try {
       const s = spec();
-      if (s.mode === 'half') {
+      if (!s) plan.textContent = `1 file, ${n} page${n === 1 ? '' : 's'}`;
+      else if (s.mode === 'half') {
         const cuts = S.sizes.filter((z) => !s.widerOnly || (s.cut === 'lr' ? z.width > z.height : z.height > z.width)).length;
         plan.textContent = cuts ? `1 file, ${n + cuts} pages (${cuts} of ${n} cut in half)` : `No page is ${s.cut === 'lr' ? 'wider than tall' : 'taller than wide'}, so nothing would be cut.`;
         ok = cuts > 0;
@@ -1527,13 +1954,17 @@ function bindSplitOptions(n: number, active: () => boolean, go: HTMLButtonElemen
       plan.classList.add('fail');
       ok = false;
     }
-    go.disabled = active() && !ok;
+    go.disabled = !ok;
   };
-  $('#sp-mode').onclick = (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]'); if (b) { mode = b.dataset.m as typeof mode; show(); } };
+  $('#sp-mode').onclick = (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-m]');
+    if (!b) return;
+    mode = b.dataset.m as typeof mode; show();
+  };
   $('#sp-cut').onclick = (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-c]'); if (b) { cut = b.dataset.c as typeof cut; show(); } };
-  for (const id of ['#sp-n', '#sp-r', '#sp-wide', '#sp-rtl']) $(id).addEventListener('input', show);
-  show();
-  return { spec: () => { const v = spec(); lastSplit = { ...lastSplit, ...v }; return v; }, refresh: show };
+  for (const id of ['#sp-n', '#sp-r', '#sp-wide', '#sp-rtl']) $(id).addEventListener('input', () => show());
+  show(true);
+  return { spec: () => { const v = spec(); if (v) lastSplit = { ...lastSplit, ...v }; return v; } };
 }
 
 function splitResult(parts: SplitPart[], timings: [string, number][] = []) {
@@ -1577,23 +2008,6 @@ $('#btn-close').onclick = () => { if (S.busy) return; if (S.panel) closePanel();
 $('#btn-open-2').onclick = pickAndLoad;
 $('#mode-draw').onclick = () => { S.mode = 'draw'; syncToolbar(); };
 $('#mode-pan').onclick = () => { S.mode = 'pan'; syncToolbar(); };
-// A horizontal swipe on the mode toggle switches mode (right: Redact, left: Scroll).
-{
-  let x0: number | null = null;
-  const seg = $('#mode-seg');
-  seg.addEventListener('pointerdown', (e) => { x0 = e.clientX; });
-  seg.addEventListener('pointerup', (e) => {
-    if (x0 === null) return;
-    const dx = e.clientX - x0; x0 = null;
-    if (Math.abs(dx) < 24) return;
-    const m = dx > 0 ? 'draw' : 'pan';
-    if (m !== S.mode) { S.mode = m; syncToolbar(); }
-    seg.dataset.swiped = '1'; // the click that follows the swipe mustn't switch it back
-    setTimeout(() => delete seg.dataset.swiped, 0);
-  });
-  seg.addEventListener('pointercancel', () => { x0 = null; });
-  seg.addEventListener('click', (e) => { if (seg.dataset.swiped) e.stopPropagation(); }, true);
-}
 $('#btn-undo').onclick = undo;
 $('#btn-redo').onclick = redo;
 $('#btn-reset').onclick = resetAll;
@@ -1677,15 +2091,35 @@ syncToolbar();
     return t;
   },
   ocrRegions: (bytes: Uint8Array, boxes: Rect[][]) => ocrRedactedRegions(bytes, boxes),
+  // Share of near-black pixels inside each box (rendered at 72 DPI), per page: 1 = fully blacked out.
+  boxDarkness: async (bytes: Uint8Array, boxes: Rect[][]) => {
+    const d = await openPdf(bytes);
+    const out: number[][] = [];
+    for (let i = 0; i < boxes.length; i++) {
+      const c = document.createElement('canvas');
+      await renderToCanvas(await d.getPage(i + 1), c, 2);
+      const g = c.getContext('2d', { willReadFrequently: true })!;
+      out.push(boxes[i].map((r) => {
+        const px = g.getImageData(Math.round(r.x * 2) + 2, Math.round(r.y * 2) + 2, Math.max(1, Math.round(r.w * 2) - 4), Math.max(1, Math.round(r.h * 2) - 4)).data;
+        let dark = 0; for (let k = 0; k < px.length; k += 4) if (px[k] + px[k + 1] + px[k + 2] < 90) dark++;
+        return dark / (px.length / 4);
+      }));
+    }
+    await closePdf(d);
+    return out;
+  },
   boxes: () => S.boxes,
   zoom: () => S.zoom,
   detectPrefs: () => prefs.detect,
+  exportPrefs: () => prefs.export,
   setAlways: (w: string[]) => { prefs.detect.always = cleanAlways(w); savePrefs(); return prefs.detect.always; },
   pageText: async (i: number) => (await S.texts!.get(i)).text,
   pageWords: async (i: number) => pageTextWords(await S.texts!.get(i)).map(({ text, line, x0, y0, x1, y1 }) => ({ text, line, x0, y0, x1, y1 })),
   ocrStats: () => ({ ...lastOcrStats, log: [...lastOcrStats.log] }),
   resetOcrStats: () => resetOcrStats(),
   setOcrEngine: (e: 'paddle' | 'tesseract') => setOcrEngine(e),
+  setOcrLang: (l: OcrLang) => setOcrLang(l),
+  ocrLang: () => getOcrLang(),
   fitZoom: () => fitZoom(),
   pointAt: (cx: number, cy: number) => pointAt(cx, cy),
   setMode: (m: 'draw' | 'pan') => { S.mode = m; syncToolbar(); },

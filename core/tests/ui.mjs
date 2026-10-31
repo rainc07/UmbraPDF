@@ -224,7 +224,7 @@ await page.setViewportSize({ width: 412, height: 860 }); await page.waitForTimeo
   await T('back'); await page.click('#st-yes');
   await page.evaluate(() => window.__scan);
   const after = await page.evaluate(() => ({ scanning: window.__umbraTest.scanning(), status: document.querySelector('#p-status')?.textContent ?? '', stop: !!document.querySelector('#p-stop') }));
-  check(stopBtn && asked === 'Stop auto redaction?', `scan: Stop button shown, Back asks "${asked}"`);
+  check(stopBtn && asked === 'Stop Auto Detect?', `scan: Stop button shown, Back asks "${asked}"`);
   check(still, 'scan: "Keep going" carries on');
   check(!after.scanning && /^Stopped/.test(after.status) && !after.stop, `scan: Stop ends it (${after.status})`);
 }
@@ -275,9 +275,28 @@ const awUi = await page.evaluate(() => [...document.querySelectorAll('#s-aw-list
 check(JSON.stringify(awUi) === '["Tan Ah Kow","Ali"]', `always redact: added, tidied, duplicates and blanks skipped (${JSON.stringify(awUi)})`);
 await page.fill('#s-aw', 'Remove Me'); await page.press('#s-aw', 'Enter');
 await page.click('#s-aw-list [data-rmaw="2"]');
+// Settings → Text in scans: one switch per language, English on by default, the last one can't be switched off.
+const langs = () => page.evaluate(() => [...document.querySelectorAll('[data-lang]')].map((x) => `${x.dataset.lang}:${x.checked}`).join(' '));
+check(await langs() === 'en:true zh:false', `text in scans: English on, 中文 off by default (${await langs()})`);
+await page.click('[data-lang="en"]'); await page.waitForTimeout(100);
+check(await langs() === 'en:true zh:false' && await page.isVisible('#s-lang-hint'), `text in scans: the last language stays on (${await langs()})`);
+await page.click('[data-lang="zh"]'); await page.click('[data-lang="en"]'); await page.waitForTimeout(100);
+check(await langs() === 'en:false zh:true', `text in scans: 中文 alone (${await langs()})`);
 await page.click('#s-close'); await page.waitForTimeout(250);
 await page.reload();
 await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+check(await langs() === 'en:false zh:true' && await page.evaluate(() => window.__umbraTest.ocrLang()) === 'ch', `text in scans: saved, and 中文 uses the Chinese model (${await langs()})`);
+await page.click('[data-lang="en"]'); await page.click('[data-lang="zh"]'); await page.waitForTimeout(100);
+check(await page.evaluate(() => window.__umbraTest.ocrLang()) === 'en', 'text in scans: English only uses the English model');
+await page.click('#s-close'); await page.waitForTimeout(250);
+// 1.2 dev builds saved one choice: "English + 中文" becomes both switches on.
+await page.evaluate((k) => { const v = JSON.parse(localStorage.getItem(k)); delete v.ocrLangs; v.ocrLang = 'ch'; localStorage.setItem(k, JSON.stringify(v)); }, key);
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+check(await langs() === 'en:true zh:true', `text in scans: older "English + 中文" setting kept as both on (${await langs()})`);
+await page.click('#s-close'); await page.waitForTimeout(250);
 const awSaved = (await page.evaluate(() => window.__umbraTest.detectPrefs())).always;
 check(JSON.stringify(awSaved) === '["Tan Ah Kow","Ali"]', `always redact: removing works and the list is saved (${JSON.stringify(awSaved)})`);
 {
@@ -293,6 +312,182 @@ check(JSON.stringify(awSaved) === '["Tan Ah Kow","Ali"]', `always redact: removi
   const al = hits.filter((h) => h.label === 'Always redact');
   check(al.length === 2 && al.every((h) => h.label === 'Always redact'), `always redact: Auto Detect finds both words, "Ali" not inside "Alibaba" (${JSON.stringify(hits)})`);
   check(al.some((h) => /^TAN AH\s+KOW$/.test(h.text) && h.boxes === 2), `always redact: phrase split across two lines is found (${JSON.stringify(al)})`);
+  await T('reset');
+}
+
+// Settings: (?) opens its help under the heading; Export defaults are saved and are what Export starts with.
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+const helpShut = await page.evaluate(() => document.querySelector('[data-helpbox="detect"]').hidden);
+await page.click('[data-help="detect"]');
+const helpOpen = await page.evaluate(() => [!document.querySelector('[data-helpbox="detect"]').hidden, document.querySelector('[data-help="detect"]').getAttribute('aria-expanded')]);
+check(helpShut && helpOpen[0] && helpOpen[1] === 'true', `help: (?) opens the explanation (${helpShut}, ${helpOpen})`);
+{
+  // Title and search stay visible at the bottom of the list.
+  const top = await page.evaluate(async () => {
+    const sh = document.querySelector('#sheet'); sh.scrollTop = 1e6; await new Promise((r) => setTimeout(r, 100));
+    const s = sh.getBoundingClientRect(), h = sh.querySelector('.ssearch h2').getBoundingClientRect(), i = document.querySelector('#s-search').getBoundingClientRect();
+    const r = [sh.scrollTop > 50, h.top >= s.top - 1, i.bottom <= s.top + 160, document.querySelector('.ssearch').classList.contains('stuck')];
+    sh.scrollTop = 0; return r;
+  });
+  check(top.every(Boolean), `settings: title and search stay on top when scrolled to the bottom (${top})`);
+}
+const imgHidden = await page.evaluate(() => document.querySelector('#x-image-opts').hidden);
+{
+  // Image settings open with no jump at the end: every frame's step is small, the last ones the smallest.
+  const hs = await page.evaluate(async () => {
+    const el = document.querySelector('#x-image-opts'), next = el.nextElementSibling ?? el.parentElement;
+    const at = () => el.getBoundingClientRect().height;
+    document.querySelector('#x-method [data-m="image"]').click();
+    const out = []; const t0 = performance.now();
+    await new Promise((r) => { const f = () => { out.push(at()); performance.now() - t0 < 500 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
+    return out;
+  });
+  const steps = hs.slice(1).map((h, i) => Math.abs(h - hs[i])).filter((x) => x > 0.05);
+  check(steps.length >= 4 && Math.max(...steps.slice(-2)) <= 4, `motion: Image settings slide open with no jump at the end (last steps ${steps.slice(-3).map((x) => x.toFixed(1)).join(', ')})`);
+}
+{
+  // ...and close without one: what's below (Always redact's Add) glides to where it stays.
+  const ys = await page.evaluate(async () => {
+    const el = document.querySelector('#s-aw-form button'), at = () => el.getBoundingClientRect().top;
+    document.querySelector('#x-method [data-m="vector"]').click();
+    const out = []; const t0 = performance.now();
+    await new Promise((r) => { const f = () => { out.push(at()); performance.now() - t0 < 500 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
+    document.querySelector('#x-method [data-m="image"]').click();
+    await new Promise((r) => setTimeout(r, 400));
+    return out;
+  });
+  const steps = ys.slice(1).map((y, i) => Math.abs(y - ys[i])).filter((x) => x > 0.05);
+  check(steps.length >= 4 && Math.max(...steps.slice(-2)) <= 4, `motion: Image settings close with no jump at the end (last steps ${steps.slice(-3).map((x) => x.toFixed(1)).join(', ')})`);
+}
+// Quality is picked from the in-app menu (no system dropdown); Back closes the menu first.
+await page.click('#x-image-opts .pick >> nth=0'); await page.waitForTimeout(250);
+const menu = await page.evaluate(() => [...document.querySelectorAll('.pick-menu [role=option]')].map((o) => o.textContent.replace(/\s+/g, ' ').trim()));
+await page.click('.pick-menu [data-i="0"]'); await page.waitForTimeout(300);
+const picked = await page.evaluate(() => [document.querySelector('#x-dpi').value, document.querySelector('#x-image-opts .pick').textContent.trim(), !!document.querySelector('.pick-menu')]);
+check(menu.length === 5 && picked[0] === '150' && picked[1] === 'Small file · 150 DPI' && !picked[2], `picker: Quality menu lists 5 choices and sets the value (${JSON.stringify(menu)}, ${picked})`);
+{
+  // A second tap (touch, as on a phone) on the picker's button closes the menu; it doesn't reopen.
+  const b = await page.evaluate(() => { const r = document.querySelector('#x-image-opts .pick').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; });
+  await page.touchscreen.tap(b[0], b[1]); await page.waitForTimeout(300);
+  const open1 = await page.evaluate(() => !!document.querySelector('.pick-menu'));
+  await page.touchscreen.tap(b[0], b[1]); await page.waitForTimeout(400);
+  const open2 = await page.evaluate(() => !!document.querySelector('.pick-menu'));
+  check(open1 && !open2, `picker: tapping its button again closes the menu (${open1}, ${open2})`);
+}
+await page.click('#s-close'); await page.waitForTimeout(250);
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+const xp = await page.evaluate(() => window.__umbraTest.exportPrefs());
+check(imgHidden && xp.method === 'image' && xp.dpi === 150, `export defaults: saved from Settings (${imgHidden}, ${JSON.stringify(xp)})`);
+{
+  const d4 = await PDFDocument.create(); d4.addPage([612, 792]); d4.addPage([612, 792]);
+  await page.evaluate(async (a) => { await window.__umbraTest.load(new Uint8Array(a)); }, Array.from(await d4.save()));
+  await page.click('#btn-export'); await page.waitForTimeout(250);
+  const dlg = await page.evaluate(() => [document.querySelector('#x-method [data-m="image"]').getAttribute('aria-pressed'), document.querySelector('#x-dpi').value,
+    document.querySelector('#sp-mode [data-m="none"]').getAttribute('aria-pressed'), document.querySelector('#sp-plan').textContent]);
+  check(dlg[0] === 'true' && dlg[1] === '150' && dlg[2] === 'true' && dlg[3] === '1 file, 2 pages', `export dialog starts from the defaults, one file (${dlg})`);
+  // Phone: the Export sheet keeps its height while options open and close inside it (no edge bouncing at the screen top).
+  const sheetHs = await page.evaluate(async () => {
+    const sh = document.querySelector('#sheet'), hs = new Set([Math.round(sh.getBoundingClientRect().height)]);
+    document.querySelector('#x-method [data-m="vector"]').click();
+    const t0 = performance.now();
+    await new Promise((r) => { const f = () => { hs.add(Math.round(sh.getBoundingClientRect().height)); performance.now() - t0 < 400 ? requestAnimationFrame(f) : r(); }; requestAnimationFrame(f); });
+    return [...hs];
+  });
+  check(sheetHs.length === 1, `motion: Export sheet height stays put while Image settings close (${sheetHs})`);
+  await page.click('#sp-mode [data-m="ranges"]'); await page.fill('#sp-r', '9');
+  const bad = await page.evaluate(() => document.querySelector('#x-go').disabled);
+  await page.click('#sp-mode [data-m="none"]');
+  const good = await page.evaluate(() => !document.querySelector('#x-go').disabled);
+  check(bad && good, `split: impossible range blocks Continue, One file allows it again (${bad}, ${good})`);
+  await page.click('#x-cancel'); await page.waitForTimeout(250);
+  const xp2 = await page.evaluate(() => window.__umbraTest.exportPrefs());
+  check(xp2.method === 'image', `export dialog changes don't overwrite Settings defaults (${JSON.stringify(xp2)})`);
+  await T('reset');
+}
+
+// Settings search: only matching settings stay; descriptions sit behind (?).
+await page.setViewportSize({ width: 412, height: 860 });
+await page.reload();
+await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
+await page.click('#btn-settings'); await page.waitForTimeout(250);
+const visibleHints = await page.evaluate(() => [...document.querySelectorAll('#sheet .row2 small.hint')].length);
+check(visibleHints === 0, `settings: row descriptions are behind (?), none shown inline (${visibleHints})`);
+await page.fill('#s-search', 'dark'); await page.waitForTimeout(400);
+const srch = await page.evaluate(() => [...document.querySelectorAll('#sheet .sset')].filter((x) => !x.hidden).map((x) => x.querySelector('h3').textContent.trim()));
+check(JSON.stringify(srch) === '["Appearance"]', `settings search "dark" keeps only Appearance (${srch})`);
+await page.fill('#s-search', 'screenshots'); await page.waitForTimeout(400);
+const srch2 = await page.evaluate(() => [...document.querySelectorAll('#sheet .sitem')].filter((x) => !x.hidden && !x.closest('.sset').hidden).length);
+await page.fill('#s-search', 'zzzz'); await page.waitForTimeout(400);
+const none = await page.evaluate(() => !document.querySelector('#s-none').hidden);
+await page.fill('#s-search', ''); await page.waitForTimeout(400);
+const back = await page.evaluate(() => [...document.querySelectorAll('#sheet .sset')].every((x) => !x.hidden));
+check(srch2 <= 1 && none && back, `settings search: help text matches, "no match" shown, clearing brings everything back (${srch2}, ${none}, ${back})`);
+// Fluid toggles: drag the theme highlight from System to Dark and let go; drag a switch's thumb.
+{
+  const bx = await page.evaluate(() => { const b = document.querySelectorAll('[data-theme-opt]'); const r = (e) => { const q = e.getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; }; return [r(b[0]), r(b[2])]; });
+  await page.mouse.move(...bx[0]); await page.mouse.down(); await page.mouse.move(bx[0][0] + 40, bx[0][1], { steps: 4 }); await page.mouse.move(bx[1][0] - 10, bx[1][1], { steps: 6 }); await page.mouse.up();
+  await page.waitForTimeout(300);
+  const th = await page.evaluate(() => document.querySelector('[data-theme-opt="dark"]').getAttribute('aria-pressed'));
+  const sw = await page.evaluate(() => { const e = document.querySelector('#s-adv'); e.scrollIntoView({ block: 'center' }); const q = e.getBoundingClientRect(); return [q.x + 6, q.y + q.height / 2, e.checked]; });
+  await page.mouse.move(sw[0], sw[1]); await page.mouse.down(); await page.mouse.move(sw[0] + 30, sw[1], { steps: 5 }); await page.mouse.up();
+  await page.waitForTimeout(200);
+  const sw2 = await page.evaluate(() => document.querySelector('#s-adv').checked);
+  check(th === 'true' && sw[2] === false && sw2 === true, `fluid toggles: dragging picks Dark, dragging a switch turns it on (${th}, ${sw2})`);
+  await page.evaluate(() => { document.querySelector('[data-theme-opt="system"]').click(); const e = document.querySelector('#s-adv'); if (e.checked) e.click(); });
+}
+await page.click('#s-close'); await page.waitForTimeout(250);
+// Auto Detect panel: title bar above the list, drag to full and to collapsed.
+{
+  const d5 = await PDFDocument.create(); const f5 = await d5.embedFont(StandardFonts.Helvetica);
+  const p5 = d5.addPage([612, 792]); for (let j = 0; j < 14; j++) p5.drawText(`Mail user${j}@example.com`, { x: 50, y: 740 - j * 30, size: 12, font: f5 });
+  await page.evaluate(async (a) => { await window.__umbraTest.load(new Uint8Array(a)); }, Array.from(await d5.save()));
+  await page.waitForTimeout(500);
+  await page.evaluate(() => document.querySelector('#btn-detect').click()); await page.waitForTimeout(400);
+  const st = await page.evaluate(() => { const p = document.querySelector('#panel'); return [p.dataset.snap, Math.round(p.offsetHeight / document.querySelector('.stage').clientHeight * 100), !!p.querySelector('.phead > .ph')]; });
+  const g = await page.evaluate(() => { const q = document.querySelector('#p-grab').getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; });
+  await page.mouse.move(...g); await page.mouse.down(); await page.mouse.move(g[0], 40, { steps: 8 }); await page.mouse.up(); await page.waitForTimeout(450);
+  const full = await page.evaluate(() => [document.querySelector('#panel').dataset.snap, document.querySelector('#panel').offsetHeight === document.querySelector('.stage').clientHeight]);
+  const g2 = await page.evaluate(() => { const q = document.querySelector('#p-grab').getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; });
+  await page.mouse.move(...g2); await page.mouse.down(); await page.mouse.move(g2[0], 900, { steps: 8 }); await page.mouse.up(); await page.waitForTimeout(450);
+  const peek = await page.evaluate(() => document.querySelector('#panel').dataset.snap);
+  const tb = await page.evaluate(() => { const q = document.querySelector('#panel .ph b').getBoundingClientRect(); return [q.x + 10, q.y + q.height / 2]; });
+  await page.mouse.click(...tb); await page.waitForTimeout(450);
+  const half = await page.evaluate(() => document.querySelector('#panel').dataset.snap);
+  check(st[0] === 'half' && st[1] >= 38 && st[1] <= 42 && st[2] && full[0] === 'full' && full[1] && peek === 'peek' && half === 'half',
+    `panel: opens at 40% with the title bar above the list, drags to full and collapsed, tap brings it back (${st}, ${full}, ${peek}, ${half})`);
+  // A drag only moves the sheet (translate): its height, and so its list's layout, changes once at the start, not every frame.
+  await page.evaluate(() => { window.__rec = []; const p = document.querySelector('#panel'); const f = () => { window.__rec.push(p.offsetHeight); if (window.__rec.length < 60) requestAnimationFrame(f); }; requestAnimationFrame(f); });
+  const g3 = await page.evaluate(() => { const q = document.querySelector('#p-grab').getBoundingClientRect(); return [q.x + q.width / 2, q.y + q.height / 2]; });
+  await page.mouse.move(...g3); await page.mouse.down(); await page.mouse.move(g3[0], g3[1] - 160, { steps: 12 }); await page.mouse.up(); await page.waitForTimeout(700);
+  const hs = await page.evaluate(() => [...new Set(window.__rec)]);
+  const rest = await page.evaluate(() => { const p = document.querySelector('#panel'); return [p.dataset.snap, p.style.translate, p.offsetHeight === parseFloat(document.querySelector('.stage').style.getPropertyValue('--sheet-h'))]; });
+  check(hs.length <= 3 && rest[1] === '' && rest[2], `panel: drag moves the sheet without re-laying it out each frame, then rests at its stop (heights ${hs.join(' ')}, ${rest})`);
+  await page.evaluate(() => document.querySelector('#p-close').click()); await page.waitForTimeout(300);
+  await T('reset');
+}
+
+// Keep original text: the progress page shows straight after Continue, not once the redaction engine is done.
+{
+  const d5 = await PDFDocument.create(); const f5 = await d5.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < 60; i++) { const p = d5.addPage([612, 792]); for (let y = 750; y > 50; y -= 14) p.drawText(`Page ${i + 1} line ${y} SECRET 12345 sample text`, { x: 40, y, size: 10, font: f5 }); }
+  await page.evaluate(async (a) => {
+    const T = window.__umbraTest; await T.load(new Uint8Array(a));
+    T.setBoxes(T.sizes().map(() => Array.from({ length: 20 }, (_, k) => ({ x: 40, y: 40 + k * 35, w: 300, h: 10 }))));
+  }, Array.from(await d5.save()));
+  await page.click('#btn-export'); await page.waitForTimeout(250);
+  await page.click('#x-method [data-m="vector"]');
+  await page.waitForTimeout(3000); // redaction engine loaded while the dialog is open, as on a phone
+  const fr = await page.evaluate(() => new Promise((done) => {
+    const t0 = performance.now(); let first = null;
+    const loop = () => { if (first === null && document.querySelector('#x-bar')) first = performance.now() - t0;
+      if (document.querySelector('#r-close')) done({ first, title: document.querySelector('#sheet h2')?.textContent }); else requestAnimationFrame(loop); };
+    document.querySelector('#x-go').click(); requestAnimationFrame(loop);
+  }));
+  check(fr.first !== null && fr.first < 500 && fr.title === 'Safe to share', `keep original text: progress shows right after Continue (${Math.round(fr.first)} ms, then "${fr.title}")`);
+  await page.click('#r-close'); await page.waitForTimeout(250);
   await T('reset');
 }
 

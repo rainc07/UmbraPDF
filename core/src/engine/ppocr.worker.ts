@@ -7,7 +7,7 @@ import { detectStrips, flipStrip, parseDict, recognise, useTensor, type Img, typ
 
 export type { PpLine, PpRec };
 export type PpRequest =
-  | { id: number; kind: 'init'; base: string; det: boolean }
+  | { id: number; kind: 'init'; base: string; det: boolean; lang: 'en' | 'ch' }
   | { id: number; kind: 'det'; img: ImageData; limit: number }
   | { id: number; kind: 'rec'; strips: Float32Array[]; widths: number[]; flip: boolean };
 export type PpResponse =
@@ -17,11 +17,11 @@ export type PpResponse =
 let det: ort.InferenceSession, rec: ort.InferenceSession, chars: string[];
 useTensor((data, dims) => new ort.Tensor('float32', data, dims));
 
-async function init(base: string, withDet: boolean) {
+async function init(base: string, withDet: boolean, lang: 'en' | 'ch') {
   ort.env.wasm.numThreads = (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
   const load = async (f: string) => new Uint8Array(await (await fetch(`${base}ppocr/${f}`)).arrayBuffer());
   const opts: ort.InferenceSession.SessionOptions = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
-  const [d, r, dict] = await Promise.all([withDet ? load('det.onnx') : null, load('rec_en.onnx'), fetch(`${base}ppocr/dict_en.txt`).then((x) => x.text())]);
+  const [d, r, dict] = await Promise.all([withDet ? load('det.onnx') : null, load(`rec_${lang}.onnx`), fetch(`${base}ppocr/dict_${lang}.txt`).then((x) => x.text())]);
   if (d) det = await ort.InferenceSession.create(d, opts);
   rec = await ort.InferenceSession.create(r, opts);
   chars = parseDict(dict);
@@ -32,7 +32,7 @@ const post = (r: PpResponse, transfer: Transferable[] = []) => (self as unknown 
 self.onmessage = async (e: MessageEvent<PpRequest>) => {
   const m = e.data;
   try {
-    if (m.kind === 'init') { ready ??= init(m.base, m.det); await ready; post({ id: m.id, ok: true }); return; }
+    if (m.kind === 'init') { ready ??= init(m.base, m.det, m.lang); await ready; post({ id: m.id, ok: true }); return; }
     if (!ready) throw new Error('not initialised');
     await ready;
     const t0 = performance.now();

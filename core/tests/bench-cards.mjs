@@ -1,6 +1,7 @@
 // ID-card recall benchmark on hard FAKE scenes (tests/fixtures-idcards.mjs).
 // Usage: node tests/bench-cards.mjs [--only id,id] [--dump dir] [--json file] [--assert]
 //   --assert: exit 1 if recall drops below the floors in FLOORS, or a redacted export still shows IC data.
+//   OCR_LANG=ch: read with the Chinese (+ English) recognition model, as with English + 中文 in Settings.
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, extname, dirname } from 'node:path';
@@ -60,8 +61,9 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
   const img = await drawScene(page, v);
   if (dump) await writeFile(`${dump}/${v.id}.jpg`, Buffer.from(img.jpeg));
   const pdf = await makeScenePdf(PDFDocument, img, v);
-  const R = await page.evaluate(async ({ pdf, ALL, engine }) => {
+  const R = await page.evaluate(async ({ pdf, ALL, engine, lang }) => {
     const T = window.__umbraTest;
+    T.setOcrLang(lang);
     await T.load(new Uint8Array(pdf));
     T.setOcrEngine(engine);
     T.resetOcrStats();
@@ -74,7 +76,7 @@ for (const v of VARIANTS.filter((x) => !only || only.includes(x.id))) {
     await T.load(ex.bytes);
     const after = await T.pageText(0);
     return { hits, ms, ocr, after, stats };
-  }, { pdf: Array.from(pdf), ALL, engine });
+  }, { pdf: Array.from(pdf), ALL, engine, lang: process.env.OCR_LANG === 'ch' ? 'ch' : 'en' });
 
   const exp = expected(v);
   const res = { id: v.id, note: v.note, ms: Math.round(R.ms), stats: R.stats, nric: [0, 0], name: [0, 0], addr: [0, 0], leak: [] };

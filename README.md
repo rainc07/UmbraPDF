@@ -18,6 +18,7 @@ this computer (`127.0.0.1`).
 ## Features
 - **Manual redaction**: draw, select, delete, undo; pinch-zoom and double-tap zoom.
 - **Find & black out**: search across all pages (match case, whole word). Scanned pages are OCR'd on the device first.
+- **Chinese text in scans** (Settings → Text in scans, one switch per language: English, 中文): 中文 reads Simplified and Traditional Chinese as well as English, about 1.3x slower per page. English alone is the default.
 - **Find personal details**: toggleable detectors for Malaysian NRIC, phone, email, card (Luhn-checked), bank account, passport, date of birth, company registration number, LHDN tax number (TIN), names (labelled, table columns, common Malaysian names, IC cards), addresses and vehicle plates, plus custom regex. Pictures inside typed pages (e.g. a pasted IC copy) are OCR'd too. Results are reviewed first: amber = will be redacted, grey = skipped.
 - **Two export methods**:
   - **Keep original text** (default): true redaction with MuPDF. Text, vector shapes fully under a box, and image pixels under each box are removed from the file. Forms and annotation appearances are flattened first, so boxes over them work too. Links, forms, attachments, scripts, metadata, outlines, the structure tree and ActualText/Alt descriptions are stripped. The output looks like the original, stays small and stays selectable.
@@ -25,7 +26,7 @@ this computer (`127.0.0.1`).
 - **Keep text selectable & searchable (OCR)**, on by default (remembered): an invisible text layer read from the *redacted* page image, so the output can be searched and copied while blacked-out parts can never be included.
 - **Automatic safety check, fail-closed**: if any check fails, the app offers no save.
   - no extractable text (or, in searchable mode, none overlapping a redaction box)
-  - no fonts (except the non-embedded Helvetica of the OCR layer), annotations, forms, attachments, outlines, JS or non-image XObjects
+  - no fonts (except the OCR layer's non-embedded Helvetica, and a glyphless Unicode font for Chinese text), annotations, forms, attachments, outlines, JS or non-image XObjects
   - no Title/Author/etc. metadata
   - every redacted region is solid black in the output (pixel check); any region that isn't is OCR'd and must contain no readable text
   - the full report is available under Settings → Advanced

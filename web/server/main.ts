@@ -54,27 +54,33 @@ const MAX_PIXELS = 64e6;
 // ---------- OCR ----------
 useTensor((data, dims) => new ort.Tensor('float32', data, dims));
 interface Engine { det: OrtSession; rec: OrtSession; chars: string[]; load: number; ep: string }
-let engine: Promise<Engine> | null = null;
+type Lang = 'en' | 'ch';
+/** One engine per text language (English; Chinese + English). The page says which with its warm-up message. */
+const engines = new Map<Lang, Promise<Engine>>();
+let lang: Lang = 'en';
 
-async function createSessions(ep: 'dml' | 'cpu'): Promise<[OrtSession, OrtSession]> {
+async function createSessions(ep: 'dml' | 'cpu', l: Lang): Promise<[OrtSession, OrtSession]> {
   const opts: import('onnxruntime-node').InferenceSession.SessionOptions = ep === 'dml'
     ? { executionProviders: ['dml'], graphOptimizationLevel: 'all', enableMemPattern: false, executionMode: 'sequential' }
     : { executionProviders: ['cpu'], graphOptimizationLevel: 'all', intraOpNumThreads: THREADS, interOpNumThreads: 1 };
-  const [d, r] = await Promise.all([readFile(resolve(MODELS, 'det.onnx')), readFile(resolve(MODELS, 'rec_en.onnx'))]);
+  const [d, r] = await Promise.all([readFile(resolve(MODELS, 'det.onnx')), readFile(resolve(MODELS, `rec_${l}.onnx`))]);
   return Promise.all([ort.InferenceSession.create(d, opts), ort.InferenceSession.create(r, opts)]) as Promise<[OrtSession, OrtSession]>;
 }
 
-function loadEngine(): Promise<Engine> {
-  engine ??= (async () => {
+function loadEngine(l: Lang = lang): Promise<Engine> {
+  let engine = engines.get(l);
+  if (engine) return engine;
+  engine = (async () => {
     const t0 = performance.now();
-    const chars = parseDict(await readFile(resolve(MODELS, 'dict_en.txt'), 'utf8'));
+    const chars = parseDict(await readFile(resolve(MODELS, `dict_${l}.txt`), 'utf8'));
     let ep = 'cpu', sessions: [OrtSession, OrtSession] | null = null;
     if (GPU) {
-      try { sessions = await createSessions('dml'); ep = 'dml'; } catch (e) { console.warn(`GPU (DirectML) unavailable, using the CPU: ${(e as Error).message}`); }
+      try { sessions = await createSessions('dml', l); ep = 'dml'; } catch (e) { console.warn(`GPU (DirectML) unavailable, using the CPU: ${(e as Error).message}`); }
     }
-    sessions ??= await createSessions('cpu');
+    sessions ??= await createSessions('cpu', l);
     return { det: sessions[0], rec: sessions[1], chars, load: Math.round(performance.now() - t0), ep };
-  })().catch((e) => { engine = null; throw e; });
+  })().catch((e) => { engines.delete(l); throw e; });
+  engines.set(l, engine);
   return engine;
 }
 
@@ -97,11 +103,12 @@ async function ocr(body: Buffer, json: boolean): Promise<object> {
   let id = 0;
   try {
     if (json) {
-      const m = JSON.parse(body.toString('utf8')) as { id: number; kind?: string };
+      const m = JSON.parse(body.toString('utf8')) as { id: number; kind?: string; lang?: string };
       id = m.id;
       if (m.kind !== 'warm') throw new Error('unknown request');
+      if (m.lang === 'en' || m.lang === 'ch') lang = m.lang;
       const e = await loadEngine();
-      return { id, ok: true, load: e.load, threads: e.ep === 'dml' ? 0 : THREADS, ep: e.ep };
+      return { id, ok: true, load: e.load, threads: e.ep === 'dml' ? 0 : THREADS, ep: e.ep, lang };
     }
     if (body.length < 16) throw new Error('short request');
     id = body.readInt32LE(0);

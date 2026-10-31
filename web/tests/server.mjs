@@ -44,6 +44,9 @@ try {
   check('caps', caps.app === 'umbra-pdf' && caps.native === true, JSON.stringify(caps));
   const warm = await (await fetch(`${base}api/ocr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"id":5,"kind":"warm"}' })).json();
   check('engine loads', warm.ok && warm.id === 5, JSON.stringify(warm));
+  const warmCh = await (await fetch(`${base}api/ocr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"id":6,"kind":"warm","lang":"ch"}' })).json();
+  check('Chinese engine loads', warmCh.ok && warmCh.lang === 'ch', JSON.stringify(warmCh));
+  await fetch(`${base}api/ocr`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"id":7,"kind":"warm","lang":"en"}' });
   const bad = new ArrayBuffer(16);
   new Int32Array(bad).set([9, 4000, 4000, 640]);
   const badR = await (await fetch(`${base}api/ocr`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: bad })).json();

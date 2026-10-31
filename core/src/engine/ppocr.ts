@@ -18,6 +18,21 @@ let seq = 0;
 const pending = new Map<number, (r: PpResponse) => void>();
 const LOAD_TIMEOUT_MS = 60_000;
 
+/** Text language of the recognition model: English, or Chinese (Simplified + Traditional, and English). */
+export type OcrLang = 'en' | 'ch';
+let lang: OcrLang = 'en';
+export const getOcrLang = (): OcrLang => lang;
+/**
+ * Choose the recognition model. The next read loads it (the engines in use are let go). Android's own scan of
+ * scanned pages (NativeScan.kt) is told directly, since it reads without asking this side.
+ */
+export function setOcrLang(l: OcrLang): void {
+  (window as unknown as { UmbraAndroid?: { setOcrLang?(l: string): void } }).UmbraAndroid?.setOcrLang?.(l);
+  if (l === lang) return;
+  lang = l;
+  terminatePpocr();
+}
+
 /** Timings of the last read, for the technical report and benchmarks. */
 export const ppStats = { log: [] as string[] };
 
@@ -104,8 +119,8 @@ export function ppocrReady(): Promise<boolean> {
   if (native) {
     ready = (async () => {
       const t0 = performance.now(), id = ++seq;
-      const r = await nativeCall(JSON.stringify({ id, kind: 'warm' }), id);
-      if (r.ok) { ppStats.log.push(`native engine load: ${Math.round(performance.now() - t0)} ms (${r.threads ? `${r.threads} threads` : 'GPU'})`); return true; }
+      const r = await nativeCall(JSON.stringify({ id, kind: 'warm', lang }), id);
+      if (r.ok) { ppStats.log.push(`native engine load (${lang}): ${Math.round(performance.now() - t0)} ms (${r.threads ? `${r.threads} threads` : 'GPU'})`); return true; }
       console.warn('[umbra] native OCR failed to load', r.error);
       native = null; nativeOff = true; ready = null;
       return ppocrReady();
@@ -117,14 +132,14 @@ export function ppocrReady(): Promise<boolean> {
     const timeout = () => new Promise<PpResponse>((res) => setTimeout(() => res({ id: 0, ok: false, error: 'timeout' }), LOAD_TIMEOUT_MS));
     try {
       const first = spawn();
-      const r = await Promise.race([call(first, { kind: 'init', base: vendorUrl(''), det: true }), timeout()]);
+      const r = await Promise.race([call(first, { kind: 'init', base: vendorUrl(''), det: true, lang }), timeout()]);
       if (!r.ok) throw new Error(r.error);
       engines = [first];
-      ppStats.log.push(`engine load: ${Math.round(performance.now() - t0)} ms`);
+      ppStats.log.push(`engine load (${lang}): ${Math.round(performance.now() - t0)} ms`);
       // Extra recognition engines load in the background; each joins the pool when ready.
       for (let i = 1; i < POOL; i++) {
         const e = spawn();
-        void call(e, { kind: 'init', base: vendorUrl(''), det: false }).then((x) => { if (x.ok) engines.push(e); else e.w.terminate(); });
+        void call(e, { kind: 'init', base: vendorUrl(''), det: false, lang }).then((x) => { if (x.ok) engines.push(e); else e.w.terminate(); });
       }
       return true;
     } catch (e) {
@@ -283,7 +298,7 @@ export async function ppocrPage(
   const blanked = (regions: Quad[]) => {
     if (!regions.length) return canvas;
     const src = document.createElement('canvas'); src.width = W; src.height = H;
-    const g = src.getContext('2d')!;
+    const g = src.getContext('2d', { willReadFrequently: true })!;
     g.drawImage(canvas, 0, 0); g.fillStyle = '#fff';
     for (const q of regions) {
       const [cx, cy] = centre(q);
@@ -296,7 +311,7 @@ export async function ppocrPage(
   const readBlock = async (src: HTMLCanvasElement, ink: ReturnType<typeof inkIslands>[number]): Promise<Block> => {
     const part = document.createElement('canvas');
     part.width = ink.w; part.height = ink.h;
-    part.getContext('2d')!.drawImage(src, ink.x0, ink.y0, ink.w, ink.h, 0, 0, ink.w, ink.h);
+    part.getContext('2d', { willReadFrequently: true })!.drawImage(src, ink.x0, ink.y0, ink.w, ink.h, 0, 0, ink.w, ink.h);
     try {
       const lines = await readLines(part, Math.min(PAGE_LIMIT, Math.max(ink.w, ink.h)));
       const sh = (b: { x0: number; y0: number; x1: number; y1: number }) => ({ x0: b.x0 + ink.x0, y0: b.y0 + ink.y0, x1: b.x1 + ink.x0, y1: b.y1 + ink.y0 });

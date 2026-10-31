@@ -1,11 +1,12 @@
 import {
-  PDFDocument, PDFRawStream, PDFFont, PDFName, PDFPage, StandardFonts, TextRenderingMode,
+  PDFDocument, PDFRawStream, PDFFont, PDFHexString, PDFName, PDFPage, PDFRef, StandardFonts, TextRenderingMode,
   pushGraphicsState, popGraphicsState, concatTransformationMatrix, drawObject,
   beginText, endText, setFontAndSize, setTextRenderingMode, setCharacterSqueeze, setTextMatrix, showText,
 } from 'pdf-lib';
 import { lastOcrStats, recognizeWordsRobust, type OcrWord } from './ocr';
 import { renderToCanvas, type PDFDocumentProxy } from './pdf';
 import { scanDpi } from './search';
+import { embedUnicodeFont, unicodeText, unicodeWidth } from './unifont';
 import type { ExportOptions, ExportResult, Progress, RedactionMap, Rect } from './types';
 
 const PT_PER_IN = 72;
@@ -88,11 +89,12 @@ function inkedWords(ctx: CanvasRenderingContext2D, words: OcrWord[]): OcrWord[] 
 }
 
 /** Keep only characters the standard (non-embedded) Helvetica can encode. */
-function encodable(font: PDFFont, text: string): string {
-  let s = '';
-  for (const ch of text) { try { font.encodeText(ch); s += ch; } catch { s += '?'; } }
-  return s;
-}
+/** A font of the text layer: its name in the page's resources, text widths and encoding. */
+interface LayerFont { name: PDFName; width(text: string, size: number): number; encode(text: string): PDFHexString }
+const latinFont = (font: PDFFont, name: PDFName): LayerFont & { has(text: string): boolean } => ({
+  name, width: (t, size) => font.widthOfTextAtSize(t, size), encode: (t) => font.encodeText(t),
+  has: (t) => { for (const ch of t) { try { font.encodeText(ch); } catch { return false; } } return true; },
+});
 
 /**
  * Invisible text layer (render mode 3) from OCR of the *redacted* pixels.
@@ -101,7 +103,7 @@ function encodable(font: PDFFont, text: string): string {
  * its words, and real spaces between words, so viewers read, copy and search it as "Tan Chee Kin", not "TanCheeKin".
  */
 function addTextLayer(
-  page: PDFPage, font: PDFFont, fontName: PDFName, words: OcrWord[], boxesPx: [number, number, number, number][],
+  page: PDFPage, latin: ReturnType<typeof latinFont>, unicode: () => LayerFont, words: OcrWord[], boxesPx: [number, number, number, number][],
   pxW: number, pxH: number, ptW: number, ptH: number,
 ): void {
   const sx = ptW / pxW, sy = ptH / pxH;
@@ -110,7 +112,7 @@ function addTextLayer(
   for (let i0 = 0; i0 < words.length;) {
     let i1 = i0 + 1;
     while (i1 < words.length && words[i1].line === words[i0].line) i1++;
-    const ws = words.slice(i0, i1).map((w) => ({ w, text: encodable(font, w.text), cx: (w.x0 + w.x1) / 2, cy: (w.y0 + w.y1) / 2, bw: w.x1 - w.x0, bh: w.y1 - w.y0 }));
+    const ws = words.slice(i0, i1).map((w) => ({ w, text: w.text, f: latin.has(w.text) ? latin : unicode(), cx: (w.x0 + w.x1) / 2, cy: (w.y0 + w.y1) / 2, bw: w.x1 - w.x0, bh: w.y1 - w.y0 }));
     i0 = i1;
     // Baseline direction (pixels, y down): least-squares line through the word centres. A single word, or a
     // sideways line (words taller than wide), keeps its own upright box as before.
@@ -135,7 +137,7 @@ function addTextLayer(
     const fits = placed.map((q, k) => {
       const next = placed[k + 1], span = next ? next.u0 - q.u0 : 0;
       const [len, text] = span > 0 ? [span, `${q.text} `] : [q.u1 - q.u0, q.text];
-      return ((len * sx) / Math.max(1e-6, font.widthOfTextAtSize(text, q.h * sy))) * 100;
+      return ((len * sx) / Math.max(1e-6, q.f.width(text, q.h * sy))) * 100;
     });
     const lineTz = turn ? Math.max(0.3 * median(fits), Math.min(...fits)) : 0;
     placed.forEach((q, k) => {
@@ -147,23 +149,23 @@ function addTextLayer(
       // readers that place spaces by gaps (poppler) need. Otherwise the word fits its own box and the space follows.
       const next = placed[k + 1];
       const text = next ? `${q.text} ` : q.text;
-      let L = q.u1 - q.u0, natural = font.widthOfTextAtSize(q.text, size);
+      let L = q.u1 - q.u0, natural = q.f.width(q.text, size);
       if (next) {
         const m = Math.max(2, q.h * 0.08), gx0 = Math.min(q.w.x1, next.w.x0), gx1 = Math.max(q.w.x1, next.w.x0);
         const y0 = Math.min(q.w.y0, next.w.y0) - m, y1 = Math.max(q.w.y1, next.w.y1) + m;
         const span = next.u0 - q.u0;
         if (span > 0 && next.u0 - q.u1 < 3 * q.h && !boxesPx.some((b) => intersects([gx0, y0, gx1 - gx0, y1 - y0], b))) {
-          L = span; natural = font.widthOfTextAtSize(text, size);
+          L = span; natural = q.f.width(text, size);
         }
       }
       if (natural <= 0 || L <= 0) return;
       // Start of the word on its baseline (0.3 of the line height below the centre line), in page points.
       const d = q.u0 - q.u, bx = q.cx + d * c - 0.3 * q.h * s, by = q.cy + d * s + 0.3 * q.h * c;
       ops.push(
-        setFontAndSize(fontName, size),
+        setFontAndSize(q.f.name, size),
         setCharacterSqueeze(turn ? lineTz : ((L * sx) / natural) * 100),
         setTextMatrix(c, -s, s, c, bx * sx, ptH - by * sy),
-        showText(font.encodeText(text)),
+        showText(q.f.encode(text)),
       );
     });
   }
@@ -181,7 +183,7 @@ async function deflate(data: Uint8Array): Promise<Uint8Array | null> {
 /** Canvas pixels and whether the page is grey (most documents), so lossless can store 1 channel instead of 3. */
 function readPixels(c: HTMLCanvasElement): { px: Uint8ClampedArray; W: number; H: number; gray: boolean } {
   const W = c.width, H = c.height;
-  const px = c.getContext('2d')!.getImageData(0, 0, W, H).data;
+  const px = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, W, H).data;
   let gray = true;
   for (let i = 0; i < px.length; i += 4) {
     const r = px[i], g = px[i + 1], b = px[i + 2];
@@ -229,11 +231,11 @@ function sampleRows(H: number): number[] {
 /** Lossless (Flate) or JPEG bytes for the page, per opts.format. */
 async function encodePage(canvas: HTMLCanvasElement, opts: ExportOptions):
   Promise<{ flate: Uint8Array; colors: 1 | 3 } | { jpeg: Uint8Array }> {
-  if (opts.format === 'jpeg') return { jpeg: await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
+  if (opts.format === 'jpeg') return { jpeg: canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
   const pix = readPixels(canvas);
   let jpeg: Uint8Array | null = null;
   if (opts.format === 'auto') {
-    jpeg = await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality);
+    jpeg = canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality);
     // Scans (paper grain, photos) compress poorly without loss: skip the full lossless pass when a sample says so.
     const rows = sampleRows(pix.H);
     const est = await deflate(losslessPixels(pix, rows).data);
@@ -242,18 +244,25 @@ async function encodePage(canvas: HTMLCanvasElement, opts: ExportOptions):
   }
   const lossless = losslessPixels(pix);
   const flate = await deflate(lossless.data);
-  if (!flate) return { jpeg: jpeg ?? await canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
+  if (!flate) return { jpeg: jpeg ?? canvasToBytes(canvas, 'image/jpeg', opts.jpegQuality) };
   if (jpeg && flate.length > jpeg.length * AUTO_LOSSLESS_MAX) return { jpeg };
   return { flate, colors: lossless.colors };
 }
 
-function canvasToBytes(c: HTMLCanvasElement, type: string, q?: number): Promise<Uint8Array> {
-  return new Promise((res, rej) =>
-    c.toBlob(async (b) => {
-      if (!b) return rej(new Error('Canvas encode failed (page too large for this device?)'));
-      res(new Uint8Array(await b.arrayBuffer()));
-    }, type, q),
-  );
+/**
+ * JPEG/PNG bytes of a canvas. Not toBlob: Chromium encodes toBlob's JPEG/PNG in idle time between frames, and
+ * with no frames it waits 1 s before encoding anyway. Android's WebView draws only when the screen does, and a
+ * still variable-refresh screen (e.g. Galaxy S23) barely does, so every page waited 1 s+ unless the user swiped.
+ * toDataURL encodes right away (same encoder, same bytes); the base64 round trip costs a few ms.
+ */
+function canvasToBytes(c: HTMLCanvasElement, type: string, q?: number): Uint8Array {
+  const url = c.toDataURL(type, q);
+  const comma = url.indexOf(',');
+  if (comma < 0 || !url.startsWith(`data:${type}`)) throw new Error('Canvas encode failed (page too large for this device?)');
+  const bin = atob(url.slice(comma + 1));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 /**
@@ -276,6 +285,7 @@ export async function exportRedacted(
   const out = await PDFDocument.create({ updateMetadata: false });
   const downscaled: ExportResult['downscaled'] = [];
   let font: PDFFont | null = null;
+  let unicodeRef: PDFRef | null = null;
   let ocrWords = 0;
   const n = src.numPages;
 
@@ -298,7 +308,8 @@ export async function exportRedacted(
     const canvas = document.createElement('canvas');
     try {
       await renderToCanvas(page, canvas, scale);
-      const ctx = canvas.getContext('2d', { alpha: false })!;
+      const tRender = performance.now() - tp;
+      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true })!;
       ctx.fillStyle = '#000';
       const boxesPx = (redactions[i - 1] ?? []).map((r) => toPixels(r, scale));
       for (const b of boxesPx) ctx.fillRect(...b);
@@ -332,7 +343,7 @@ export async function exportRedacted(
         const k = Math.min(1, OCR_MAX_DPI / PT_PER_IN / scale);
         const src = document.createElement('canvas');
         src.width = Math.round(canvas.width * k); src.height = Math.round(canvas.height * k);
-        const c2 = src.getContext('2d', { alpha: false })!;
+        const c2 = src.getContext('2d', { alpha: false, willReadFrequently: true })!;
         c2.imageSmoothingQuality = 'high';
         c2.drawImage(canvas, 0, 0, src.width, src.height);
         c2.fillStyle = '#fff';
@@ -352,7 +363,9 @@ export async function exportRedacted(
       onProgress(`Compressing page ${i}/${n}`, (i - 0.5) / n);
       const p = out.addPage([base.width, base.height]);
       // Lossless is written as raw Flate (native, fast), avoiding pdf-lib's pure-JS PNG decode.
+      const te = performance.now();
       const enc = await encodePage(canvas, opts);
+      const tEnc = performance.now() - te;
       if ('flate' in enc) {
         const dict = out.context.obj({
           Type: 'XObject', Subtype: 'Image', Width: canvas.width, Height: canvas.height,
@@ -371,10 +384,14 @@ export async function exportRedacted(
       if (words.length) {
         font ??= await out.embedFont(StandardFonts.Helvetica); // standard 14: no font program embedded
         const fontName = p.node.newFontDictionary('F', font.ref); // a PDFName (its string form has a '/', which breaks Tf)
-        addTextLayer(p, font, fontName, words, boxesPx, canvas.width, canvas.height, base.width, base.height);
+        // Chinese and other text Helvetica can't encode: the Unicode font, added to the document and page when first needed.
+        let uni: LayerFont | null = null;
+        const unicode = () => uni ??= { name: p.node.newFontDictionary('U', unicodeRef ??= embedUnicodeFont(out)), width: unicodeWidth, encode: unicodeText };
+        addTextLayer(p, latinFont(font, fontName), unicode, words, boxesPx, canvas.width, canvas.height, base.width, base.height);
         ocrWords += words.length;
       }
-      lastOcrStats.log.push(`export page ${i}: ${Math.round(performance.now() - tp)} ms, text ${how} ${Math.round(tText)} ms, ${canvas.width}x${canvas.height}`);
+      lastOcrStats.log.push(`export page ${i}: ${Math.round(performance.now() - tp)} ms (draw ${Math.round(tRender)}, `
+        + `text ${how} ${Math.round(tText)}, encode ${'flate' in enc ? 'lossless' : 'jpeg'} ${Math.round(tEnc)}), ${canvas.width}x${canvas.height}`);
     } finally {
       canvas.width = canvas.height = 0; // release GPU/heap memory early
       page.cleanup();
@@ -384,5 +401,8 @@ export async function exportRedacted(
   out.setProducer('Umbra PDF');
   out.setCreator('Umbra PDF');
   onProgress('Writing PDF', 1);
-  return { bytes: await out.save({ useObjectStreams: true }), downscaled, ocrWords };
+  const ts = performance.now();
+  const bytes = await out.save({ useObjectStreams: true });
+  lastOcrStats.log.push(`export write PDF: ${Math.round(performance.now() - ts)} ms`);
+  return { bytes, downscaled, ocrWords };
 }

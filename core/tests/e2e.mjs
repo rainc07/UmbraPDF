@@ -459,12 +459,14 @@ const V = await page.evaluate(async (arr) => {
   const control = await T.ocrRegions(src, boxes.map((b, i) => (i === 0 ? [imgBox] : [])));
   const nbText = await T.text(nb);
   const neg = await T.verifyVector(src, boxes); // the untouched source must fail the vector check
-  return { report: out.report, text, ms, size: out.bytes.length, imgSize: img.bytes.length, out: Array.from(out.bytes),
+  const dark = (await T.boxDarkness(out.bytes, boxes)).flat();
+  return { dark, report: out.report, text, ms, size: out.bytes.length, imgSize: img.bytes.length, out: Array.from(out.bytes),
     under, control, nbText, neg, nBoxes: boxes.map((b) => b.length) };
 }, Array.from(vfx));
 
 check(V.nBoxes[0] >= 5 && V.nBoxes[2] >= 1, `vector: boxes from Find on normal, invisible, Form XObject and rotated text (${V.nBoxes})`);
 check(!V.neg.ok && V.neg.textInBoxes > 0 && V.neg.annotations > 0, `vector: negative control, source fails the check (${V.neg.issues.length} issues: ${V.neg.issues.join('; ').slice(0, 160)})`);
+check(V.dark.length > 5 && V.dark.every((d) => d > 0.97), `vector: every box is solid black where it was drawn, incl. rotated page (${V.dark.map((d) => d.toFixed(2)).join(' ')})`);
 check(V.report.ok, `vector: export verified clean (${V.ms} ms): ${V.report.issues.join('; ') || 'no issues'}`);
 check(!/SECRET|555|777|888|999|4321|Hidden/.test(V.text), `vector: no redacted text extractable ("${V.text.replace(/\s+/g, ' ').slice(0, 120)}")`);
 check(/PUBLIC HEADING/.test(V.text) && /ROT PUBLIC/.test(V.text), 'vector: text outside the boxes is kept and selectable (incl. rotated page)');
@@ -664,6 +666,41 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
   check(JSON.stringify(texts) === '["Kuala Lumpur","TAN CHEE KIN"]', `always redact (scanned): name split over two lines and the place found, not inside "Lumpurville" (${JSON.stringify(hits)})`);
 }
 
+// Settings → English + 中文: a scanned page in Simplified and Traditional Chinese (with English) is read, labelled
+// Chinese names and addresses are found, and the copy-ready export keeps the Chinese text searchable.
+{
+  const lines = ['租赁合约 Tenancy Agreement', '姓名：陈志强', '地址：吉隆坡甲洞路十二号', '繁體中文：臺灣銀行帳戶', '公开内容 Public line stays'];
+  const img = await page.evaluate(async (lines) => {
+    const c = document.createElement('canvas'); c.width = 1654; c.height = 2339; const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#111'; g.font = '40px "WenQuanYi Zen Hei", "Noto Sans CJK SC", sans-serif';
+    lines.forEach((t, i) => g.fillText(t, 150, 200 + i * 80));
+    const bl = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+    return Array.from(new Uint8Array(await bl.arrayBuffer()));
+  }, lines);
+  const d = await PDFDocument.create(); const p = d.addPage([595, 842]);
+  p.drawImage(await d.embedJpg(Uint8Array.from(img)), { x: 0, y: 0, width: 595, height: 842 });
+  const r = await page.evaluate(async (b) => {
+    const T = window.__umbraTest;
+    T.setOcrLang('ch');
+    try {
+      await T.load(new Uint8Array(b));
+      const text = await T.pageText(0);
+      const found = (await T.search('臺灣銀行')).length;
+      const hits = (await T.detect(['name', 'address'])).map((h) => ({ label: h.label, text: h.text }));
+      T.applyAll();
+      const ex = await T.export({ dpi: 200, searchable: true }, true);
+      return { text, hits, found, ok: ex.report.ok, issues: ex.report.issues, raw: await T.text(ex.bytes, true) };
+    } finally { T.setOcrLang('en'); }
+  }, Array.from(await d.save()));
+  const flat = r.text.replace(/\s+/g, '');
+  // Spaces between English words on a line that also has Chinese can be lost with this model ("PublicLine").
+  check(['陈志强', '甲洞路', '臺灣銀行帳戶', '公开内容', 'Publiclinestays', 'TenancyAgreement'].every((w) => flat.includes(w)), `Chinese OCR: Simplified + Traditional read (${JSON.stringify(r.text)})`);
+  check(r.hits.some((h) => h.label === 'Name' && h.text === '陈志强') && r.hits.some((h) => h.label === 'Address' && h.text.includes('吉隆坡')), `Chinese OCR: labelled name and address found (${JSON.stringify(r.hits)})`);
+  check(r.found === 1, `Chinese OCR: Find "臺灣銀行" (${r.found})`);
+  check(r.ok && !r.raw.includes('陈志强') && !r.raw.includes('吉隆坡') && r.raw.replace(/\s+/g, '').includes('繁體中文：臺灣銀行帳戶') && r.raw.includes('公开内容'),
+    `Chinese OCR: copy-ready export verified, Chinese text searchable, redacted name gone (${r.issues.join('; ') || 'no issues'}; ${JSON.stringify(r.raw)})`);
+}
+
 // ---------------- Split ----------------
 {
   const d = await PDFDocument.create(); const f = await d.embedFont(StandardFonts.Helvetica);
@@ -720,7 +757,6 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
     });
     const exportSplit = () => {
       document.querySelector('#btn-export').click();
-      const sw = document.querySelector('#x-split'); sw.checked = true; sw.dispatchEvent(new Event('change'));
       document.querySelector('#sp-mode [data-m="every"]').click();
       document.querySelector('#x-go').click();
     };
@@ -788,6 +824,23 @@ check(consoleErrors.length === 0, `no console errors ${consoleErrors.join(' | ')
   check(!/850505/.test(p2) && /Public/.test(p2), 'page with boxes: boxed value absent, rest read by OCR');
   check(r.ok2 && /picture read before/.test(r.log2[1] ?? '') && /text layer reused/.test(r.log2[0] ?? ''), `after the pages were read, the page with boxes reuses that OCR (${r.log2.join(' | ')})`);
   check(!/850505/.test(r.pages2[1] ?? '') && /Public line/.test(r.pages2[1] ?? '') && !/GHOSTWORD|BARWORD/.test(r.pages2.join(' ')), `reused OCR on the page with boxes: boxed value absent, rest searchable ("${(r.pages2[1] ?? '').slice(0, 80)}")`);
+}
+
+// Pages render without animation frames: phones with a variable refresh rate fire them at 1-10 Hz while the
+// screen is still, which made exports crawl until the user touched the screen.
+{
+  const r = await page.evaluate(async (arr) => {
+    const T = window.__umbraTest;
+    await T.load(new Uint8Array(arr));
+    const raf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0; // frames never come
+    try {
+      const t0 = performance.now();
+      const out = await Promise.race([T.export({ dpi: 150 }, false), new Promise((r) => setTimeout(() => r(null), 20000))]);
+      return { done: !!out, ms: Math.round(performance.now() - t0) };
+    } finally { window.requestAnimationFrame = raf; }
+  }, Array.from(fixture));
+  check(r.done, `export finishes without animation frames (${r.ms} ms)`);
 }
 
 await browser.close();

@@ -1,6 +1,7 @@
 import { PDFDocument, PDFDict, PDFName, PDFArray, PDFRawStream, PDFRef, PDFStream, decodePDFRawStream } from 'pdf-lib';
 import { closePdf, openPdf } from './pdf';
 import { extractPageText } from './search';
+import { isUnicodeLayerFont } from './unifont';
 import type { Progress, RedactionMap, VerifyReport } from './types';
 
 const RISKY_CATALOG_KEYS = ['AcroForm', 'Names', 'Outlines', 'OpenAction', 'AA', 'Dests', 'StructTreeRoot', 'Metadata', 'JavaScript', 'EmbeddedFiles'];
@@ -10,16 +11,21 @@ const FORBIDDEN_KEYS = ['JS', 'JavaScript', 'EmbeddedFile', 'EmbeddedFiles', 'La
 
 /**
  * Post-export check. Fails closed.
- * - image mode: no extractable text (or, when searchable, none inside a box and only the plain Helvetica OCR font),
+ * - image mode: no extractable text (or, when searchable, none inside a box and only the OCR text layer's fonts),
  *   only image XObjects.
  * - vector mode (original text kept): no character inside a box; fonts and form XObjects are allowed.
  * Both: no annotations, forms, attachments, outlines, scripts, metadata, or hidden ActualText/Alt descriptions.
  */
 export interface VerifyContext { searchable: boolean; redactions: RedactionMap; mode?: 'image' | 'vector' }
 
-/** Only the non-embedded standard Helvetica (used by the OCR text layer) is acceptable. */
+/**
+ * Only the OCR text layer's fonts are acceptable: the non-embedded standard Helvetica, and the glyphless
+ * Unicode font for Chinese and other text Helvetica can't encode (unifont.ts).
+ */
 function isAllowedFont(d: PDFDict | undefined): boolean {
-  return !!d && d.get(PDFName.of('Subtype'))?.toString() === '/Type1'
+  if (!d) return false;
+  if (d.get(PDFName.of('Subtype'))?.toString() === '/Type0') return isUnicodeLayerFont(d);
+  return d.get(PDFName.of('Subtype'))?.toString() === '/Type1'
     && d.get(PDFName.of('BaseFont'))?.toString() === '/Helvetica'
     && d.get(PDFName.of('FontDescriptor')) === undefined;
 }
@@ -93,9 +99,13 @@ export async function verifyOutput(
   try {
     for (let i = 1; i <= doc.numPages; i++) {
       onProgress(`Verifying page ${i}/${doc.numPages}`, i / doc.numPages);
-      // Character geometry (rotation-aware). A character whose centre lies inside a box is a leak.
-      const pt = await extractPageText(doc, i - 1, { ocr: 'never' });
       const boxes = ctx.redactions[i - 1] ?? [];
+      const page = await doc.getPage(i);
+      annotations += (await page.getAnnotations()).length;
+      // Keep original text keeps the text of pages without boxes on purpose: nothing there can be inside a box.
+      if (vector && !boxes.length) { page.cleanup(); continue; }
+      // Character geometry (rotation-aware). A character whose centre lies inside a box is a leak.
+      const pt = await extractPageText(doc, i - 1, { ocr: 'never', near: boxes });
       let c = 0;
       for (let k = 0; k < pt.text.length; k++) {
         if (!pt.text[k].trim()) continue;
@@ -106,8 +116,6 @@ export async function verifyOutput(
         if (boxes.some((b) => cx > b.x + 0.5 && cx < b.x + b.w - 0.5 && cy > b.y + 0.5 && cy < b.y + b.h - 0.5)) textInBoxes++;
       }
       if (c) { textChars += c; textPages.push(i); }
-      const page = await doc.getPage(i);
-      annotations += (await page.getAnnotations()).length;
       page.cleanup();
     }
     if (await doc.getAttachments()) issues.push('Attachments present');

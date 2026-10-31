@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.Choreographer
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -94,11 +95,14 @@ class MainActivity : ComponentActivity() {
 
     // ---- Native OCR (PaddleOCR on ONNX Runtime), reached from JS as window.UmbraOcr (WebMessageListener) ----
     private lateinit var ocr: PpOcr
-    private val ocrExec = Executors.newSingleThreadExecutor()
+    private val ocrExec = Executors.newSingleThreadExecutor { r -> PpOcr.ocrThread(r, "umbra-ocr") }
     @Volatile var nativeOcr = false
         private set
     @Volatile var nativeOcrBinary = false
         private set
+
+    /** Recognition language for the next read ("en" or "ch"), from Settings. */
+    fun setOcrLang(lang: String) { if (::ocr.isInitialized) ocr.lang = lang }
 
     private fun installOcr() = try { installOcrUnsafe() } catch (e: Throwable) {
         android.util.Log.e("umbra", "native OCR unavailable", e) // the web core falls back to Tesseract
@@ -125,7 +129,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Binary request: little-endian int32 header [id, width, height, detLimit] + RGBA pixels.
-     * String request: {"id", "kind":"warm"} to load the models, or {"id","w","h","limit","b64"} (no ArrayBuffer support).
+     * String request: {"id", "kind":"warm", "lang"} to load the models (lang "en" or "ch", optional), or {"id","w","h","limit","b64"} (no ArrayBuffer support).
      */
     private fun ocrRequest(bin: ByteArray?, str: String?): String {
         var id = 0
@@ -140,6 +144,7 @@ class MainActivity : ComponentActivity() {
                 val j = JSONObject(str ?: "{}")
                 id = j.optInt("id")
                 if (j.optString("kind") == "warm") {
+                    if (j.has("lang")) ocr.lang = j.optString("lang")
                     val ms = ocr.ensureLoaded()
                     JSONObject().put("id", id).put("ok", true).put("load", ms).put("threads", ocr.threads).toString()
                 } else {
@@ -221,9 +226,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * While long work runs, keep the WebView drawing every frame at the display's top refresh rate. A phone with a
+     * variable refresh rate (Galaxy S23) drops to 1-10 Hz when the screen is still, and the WebView's graphics work
+     * only runs when it draws, so exports crawled unless the user kept swiping. Stops when the work is done.
+     */
+    private val keepDrawing = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!jsWork) return
+            web.postInvalidateOnAnimation()
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    private fun fastFrames(on: Boolean) {
+        val top = if (on) {
+            @Suppress("DEPRECATION") val d = windowManager.defaultDisplay
+            val cur = d.mode
+            d.supportedModes.filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }
+                .maxOfOrNull { it.refreshRate } ?: 0f
+        } else 0f
+        window.attributes = window.attributes.also { it.preferredRefreshRate = top }
+        if (on) {
+            Choreographer.getInstance().removeFrameCallback(keepDrawing)
+            Choreographer.getInstance().postFrameCallback(keepDrawing)
+        }
+    }
+
     fun workStart(title: String) {
         workTitle = title
         jsWork = true
+        fastFrames(true)
         WorkService.clearDone(this)
         if (scanning) WorkService.progress(this, title, "", -1) else WorkService.start(this, title)
     }
@@ -234,6 +267,7 @@ class MainActivity : ComponentActivity() {
     fun workDone(title: String, text: String) {
         val was = jsWork
         jsWork = false
+        fastFrames(false)
         if (!scanning) WorkService.stop(this)
         if (was && !visible) WorkService.done(this, title, text)
     }

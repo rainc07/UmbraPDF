@@ -160,14 +160,19 @@ export function flipStrip(x: Float32Array, w: number): Float32Array {
 }
 
 /** Recognise strips in batches (similar widths together, zero-padded); greedy CTC decode with char positions. */
+/** Space weight in a gap between two characters above which a space is written (the space is the last class). */
+const SPACE_IN_GAP = 0.05;
+
 export async function recognise(rec: OrtSession, chars: string[], strips: Float32Array[], widths: number[]): Promise<PpRec[]> {
   const res: PpRec[] = new Array(strips.length);
   const order = widths.map((_, i) => i).sort((a, b) => widths[a] - widths[b]);
-  // Batches of similar widths (padding is wasted work), at most 8 strips each.
+  // Batches of similar widths (padding is wasted work), at most 8 strips each. One at a time with the Chinese
+  // model: its output has 18,385 classes per step (about 20 MB per line), and batches of it ran 1.7x slower.
+  const most = chars.length > 1000 ? 1 : 8;
   const batches: number[][] = [];
   for (const i of order) {
     const b = batches[batches.length - 1];
-    if (b && b.length < 8 && widths[i] <= 1.3 * widths[b[0]]) b.push(i); else batches.push([i]);
+    if (b && b.length < most && widths[i] <= 1.3 * widths[b[0]]) b.push(i); else batches.push([i]);
   }
   for (const idx of batches) {
     const maxW = Math.max(...idx.map((i) => widths[i]));
@@ -182,7 +187,7 @@ export async function recognise(rec: OrtSession, chars: string[], strips: Float3
     const t = Object.values(out)[0], [, T, C] = t.dims as number[], p = t.data as Float32Array;
     idx.forEach((i, b) => {
       const used = (widths[i] / maxW) * T; // timesteps that cover the real (unpadded) strip
-      let prev = 0, text = '', confSum = 0;
+      let prev = 0, text = '', confSum = 0, n = 0, gap = 0, gap0 = 0;
       const cs: PpLine['chars'] = [];
       for (let tt = 0; tt < T; tt++) {
         let best = 0, bv = -1;
@@ -190,12 +195,19 @@ export async function recognise(rec: OrtSession, chars: string[], strips: Float3
         for (let c = 0; c < C; c++) if (p[o + c] > bv) { bv = p[o + c]; best = c; }
         if (best !== 0 && best !== prev) {
           const ch = chars[best - 1] ?? '';
-          text += ch; confSum += bv;
+          // The Chinese model often leaves out the space between English words ("TenancyAgreement"), but
+          // still gives it some weight in the gap: a likely space there is written.
+          if (gap >= SPACE_IN_GAP && ch !== ' ' && cs.length && cs[cs.length - 1].c !== ' ') {
+            text += ' '; cs.push({ c: ' ', u0: Math.min(1, gap0 / used), u1: Math.min(1, tt / used) });
+          }
+          text += ch; confSum += bv; n++;
           cs.push({ c: ch, u0: Math.min(1, tt / used), u1: Math.min(1, (tt + 1) / used) });
+          gap = 0;
         } else if (best !== 0 && best === prev && cs.length) cs[cs.length - 1].u1 = Math.min(1, (tt + 1) / used);
+        else if (best === 0) { if (prev !== 0) gap0 = tt; gap = Math.max(gap, p[o + C - 1]); }
         prev = best;
       }
-      res[i] = { text, conf: cs.length ? confSum / cs.length : 0, chars: cs };
+      res[i] = { text, conf: n ? confSum / n : 0, chars: cs };
     });
   }
   return res;

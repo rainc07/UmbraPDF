@@ -59,6 +59,8 @@ android {
             // Whole-app R8 (keep rules in src/main/keepRules). Optimising only some packages (packageScope,
             // experimental) left app classes pointing at changed Kotlin internals: IllegalAccessError at launch.
             optimization { enable = true }
+            // -PwebDebug (CI's emulator motion check only): lets the check drive the WebView over DevTools.
+            isDebuggable = project.hasProperty("webDebug")
         }
         release {
             if (hasReleaseKey) signingConfig = signingConfigs.getByName("release")

@@ -54,13 +54,30 @@ export async function pageSizes(doc: PDFDocumentProxy): Promise<PageSize[]> {
   return sizes;
 }
 
-/** Render a page into a canvas at `scale` (CSS px per point × devicePixelRatio handled by caller). */
+/** Yield to the event loop without waiting for a frame (a MessageChannel task isn't throttled like timers). */
+export function nextTask(): Promise<void> {
+  return new Promise((r) => { const ch = new MessageChannel(); ch.port1.onmessage = () => { ch.port1.close(); r(); }; ch.port2.postMessage(0); });
+}
+
+/**
+ * Render a page into a canvas at `scale` (CSS px per point × devicePixelRatio handled by caller).
+ * pdf.js paces rendering by animation frames, made for drawing on screen. Our canvases are never on screen, and
+ * frames can be very slow: phones with a variable refresh rate (e.g. Galaxy S23) drop to 1-10 Hz while the screen
+ * is still, so a page that renders in 0.2 s took many seconds unless the user touched the screen. Pace by tasks.
+ */
 export async function renderToCanvas(page: PDFPageProxy, canvas: HTMLCanvasElement, scale: number): Promise<void> {
   const vp = page.getViewport({ scale });
   canvas.width = Math.max(1, Math.ceil(vp.width));
   canvas.height = Math.max(1, Math.ceil(vp.height));
-  const ctx = canvas.getContext('2d', { alpha: false })!;
+  // A CPU (software) canvas: every page we render is read back (encode, OCR, checks). In Android's WebView a GPU
+  // canvas only does its work when the app draws a frame, so a still screen (1-10 Hz) stalled exports until the
+  // user swiped. The other offscreen canvases in the engine are CPU canvases for the same reason.
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true })!;
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvasContext: ctx, canvas, viewport: vp, annotationMode: AnnotationMode.ENABLE }).promise;
+  const task = page.render({ canvasContext: ctx, canvas, viewport: vp, annotationMode: AnnotationMode.ENABLE });
+  const internal = (task as unknown as { _internalRenderTask?: { _useRequestAnimationFrame?: boolean } })._internalRenderTask;
+  if (internal) internal._useRequestAnimationFrame = false;
+  task.onContinue = (cont: () => void) => { void nextTask().then(cont); };
+  await task.promise;
 }

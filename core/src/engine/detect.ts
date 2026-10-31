@@ -134,6 +134,15 @@ const nameOk = (m: RegExpExecArray, text: string) => {
   return !NOT_PERSON_LABEL.test(before.replace(/\b(?:name|nama)\b\.?\s*[:：-]?\s*$/i, '').trimEnd());
 };
 
+/** Chinese labels (Simplified and Traditional) and the Chinese name after one: "姓名：陈志强", "租客姓名 林美玲". */
+const ZH_NAME_LABELS = ['姓名', '名字', '户名', '戶名', '申请人', '申請人', '联系人', '聯繫人', '聯絡人', '收件人', '收货人', '收貨人', '持卡人',
+  '租客', '租户', '租戶', '承租人', '出租人', '房东', '房東', '业主', '業主', '屋主', '担保人', '擔保人', '见证人', '見證人', '受益人', '病人', '患者', '员工', '員工'];
+/** Field words that follow a Chinese name without a space ("姓名：陈志强性别：男"). */
+const ZH_FIELD_NEXT = '性别|性別|身份|证件|證件|护照|護照|电话|電話|手机|手機|地址|住址|日期|出生|年龄|年齡|国籍|國籍|民族|签名|簽名|职|職|编号|編號|号码|號碼|邮|郵';
+const zhNameLabelRe = ZH_NAME_LABELS.join('|');
+const ZH_NAME = `(?<=(?:${zhNameLabelRe})(?:[ \\t]*[:：][ \\t]*|[ \\t]+))(?!${zhNameLabelRe})\\p{Script=Han}{2,4}(?=$|[^\\p{Script=Han}]|${ZH_FIELD_NEXT})`;
+const ZH_ADDR_LABELS = '地址|住址|通讯地址|通訊地址|居住地址|联系地址|聯繫地址|聯絡地址|户籍地址|戶籍地址';
+
 /** Malaysian Chinese surnames (romanised) and common given-name syllables: "TAN WEI MING", "Lim Siew Ling". */
 const CN_SURNAMES = ['Tan', 'Lim', 'Lee', 'Ng', 'Wong', 'Ong', 'Chan', 'Chong', 'Goh', 'Teh', 'Yap', 'Low', 'Ho', 'Ooi', 'Khoo', 'Leong',
   'Cheah', 'Chin', 'Choo', 'Chua', 'Foo', 'Koh', 'Kok', 'Lai', 'Lau', 'Liew', 'Loh', 'Mak', 'Pang', 'Phang', 'Poh', 'Quek', 'Seah', 'See',
@@ -371,6 +380,8 @@ export const PRESETS: Preset[] = [
           return { start: m.index, end: m.index + (keep2 ? m[0].length : l1.length) };
         } },
       { regex: new RegExp(`(?<=(?:^|[^\\p{L}])(?:${honorRe})\\.?\\s+)${NAME}`, 'gu'), accept: nameOk },
+      // Chinese, after a Chinese label (scans read with English + 中文 in Settings).
+      { regex: new RegExp(ZH_NAME, 'gu') },
       { regex: new RegExp(`(?<![\\p{L}])${NAME_WORD}(?:[ ]+${NAME_WORD}){0,3}[ ]+(?:${ci('binti')}|${ci('bin')}|${ci('bte')}|${ci('a')}\\/${ci('l')}|${ci('a')}\\/${ci('p')}|${ci('s')}\\/${ci('o')}|${ci('d')}\\/${ci('o')})[ ]+${NAME_WORD}(?:[ ]+${NAME_WORD}){0,3}`, 'gu'), accept: nameOk },
     ],
   },
@@ -381,6 +392,8 @@ export const PRESETS: Preset[] = [
       { regex: new RegExp(`(?<=(?:^|[^\\p{L}])(?:${addrLabelRe})\\s*[:：-]\\s*)\\S[^\\n]{4,}(?:\\n[^\\n]+){0,4}`, 'gu'),
         refine: (m) => addressRange(m, true) },
       // Unlabelled: up to 2 lines before a line with "postcode City".
+      // Chinese label: the rest of the line ("地址：吉隆坡甲洞…").
+      { regex: new RegExp(`(?<=(?:${ZH_ADDR_LABELS})(?:[ \\t]*[:：][ \\t]*|[ \\t]+))[^\\s:：][^\\n]{3,}`, 'gu') },
       { regex: new RegExp(`(?<![^\\n])(?:[^\\n]*\\n){0,2}[^\\n]*${POSTCODE}[ ,]+[A-Za-z][^\\n]*(?:\\n[^\\n]+)?`, 'g'),
         refine: (m) => addressRange(m, false) },
     ],
