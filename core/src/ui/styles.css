@@ -471,3 +471,26 @@ body:not(.has-doc) .dock { position: fixed; }
 .switch:checked::after { transform: translateX(var(--sx, 18px)); }
 .switch.seg-drag::after { transition: none; }
 @media (prefers-reduced-motion: reduce) { .fluid.seg-ready::before { transition: none; } }
+
+/* ---------- Pickers (in place of the system's <select> list) ---------- */
+.sheet select[data-picker] { display: none; }
+.pick { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; max-width: 62vw; padding: 8px 10px 8px 14px;
+  font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 12px; box-shadow: none; }
+.pick > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick .ico { flex: none; width: 18px; height: 18px; color: var(--muted); transition: transform .2s cubic-bezier(.2, 0, 0, 1); }
+.pick[aria-expanded="true"] { border-color: var(--accent); }
+.pick[aria-expanded="true"] .ico { transform: rotate(180deg); }
+.pick-catch { position: fixed; inset: 0; z-index: 30; }
+.pick-menu { position: fixed; z-index: 31; padding: 6px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line);
+  box-shadow: var(--shadow); max-height: 70vh; overflow: auto; overscroll-behavior: contain; }
+.pick-menu button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px; margin: 0;
+  border: 0; border-radius: 12px; background: transparent; box-shadow: none; color: var(--text); font: inherit; text-align: left; }
+.pick-menu button:active { transform: none; background: var(--surface-2); }
+.pick-menu button[aria-selected="true"] { background: var(--accent-soft); }
+.pick-menu .pt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pick-menu .pt b { font-weight: 500; }
+.pick-menu .pt small { color: var(--muted); font-size: .8rem; }
+.pick-menu .pm { color: var(--muted); font-size: .86rem; white-space: nowrap; }
+.pick-menu button[aria-selected="true"] .pm { color: var(--accent-text); }
+.pick-menu .pk { flex: none; width: 20px; height: 20px; color: var(--accent-text); }
+.pick-menu .pk .ico { width: 20px; height: 20px; }

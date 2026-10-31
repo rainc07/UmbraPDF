@@ -77,6 +77,7 @@ function modal(html: string, dismissable = false, onDismiss: (() => void) | null
 let modalCloseTimer = 0;
 /** Slide/fade out, then hide. A new modal() during the animation cancels it. */
 function closeModal() {
+  closePicker?.();
   modalDismissable = false; modalOnDismiss = null;
   const m = $('#modal');
   if (m.hidden || m.classList.contains('closing')) return;
@@ -219,6 +220,7 @@ function confirmLeave(onYes: () => void) {
 
 /** Android Back: close dialog → stop a scan (asks) → close panel → leave document (asking if unsaved) → let the OS handle it. */
 function handleBack(): boolean {
+  if (closePicker) { closePicker(); return true; }
   if (dismissModal()) return true;
   if (S.scan) { askStopScan(); return true; }
   if (S.busy) return true;
@@ -695,7 +697,11 @@ const row2 = (title: string, control: string, id: string, help?: string, forId?:
 /** A heading with a (?) that opens the longer explanation right under it. */
 const helpH = (tag: 'h2' | 'h3', title: string, id: HelpId) => `<${tag} class="hh">${title}${helpBtn(id, title)}</${tag}>${helpBox(id)}`;
 const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-const EASE = 'cubic-bezier(.2, .8, .2, 1)';
+/**
+ * Starts gently, then glides in. The old curve (.2, .8, .2, 1) moved 15% of the way in the first frame on a
+ * 120 Hz phone, which read as a jolt at the start of every slide.
+ */
+const EASE = 'cubic-bezier(.2, 0, 0, 1)';
 /** Its children's margins stay inside it, so its height while animating is the height it ends with (no jump at the end). */
 function contain(el: HTMLElement) {
   for (const e of [el, el.parentElement]) {
@@ -738,7 +744,7 @@ function slide(el: HTMLElement, show: boolean, instant = false) {
   const cs = getComputedStyle(el);
   const full = { height: `${el.offsetHeight}px`, opacity: 1, marginTop: cs.marginTop, marginBottom: cs.marginBottom, paddingTop: cs.paddingTop, paddingBottom: cs.paddingBottom };
   const none = { height: '0px', opacity: 0, marginTop: '0px', marginBottom: goneMargin(el), paddingTop: '0px', paddingBottom: '0px' };
-  animateHeight(el, show ? [none, full] : [full, none], 240, () => { if (!show) el.hidden = true; });
+  animateHeight(el, show ? [none, full] : [full, none], 300, () => { if (!show) el.hidden = true; });
 }
 /**
  * One box in place of another (Split's ways): the box keeps its place and changes height while the new
@@ -757,10 +763,78 @@ function swapBox(boxes: HTMLElement[], on: HTMLElement | null, instant = false) 
   on.hidden = false; on.dataset.slide = 'true';
   contain(on);
   const h1 = on.offsetHeight;
-  animateHeight(on, [{ height: `${h0}px` }, { height: `${h1}px` }], 280);
+  animateHeight(on, [{ height: `${h0}px` }, { height: `${h1}px` }], 300);
   on.querySelectorAll<HTMLElement>(':scope > *').forEach((c) =>
     c.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 220, delay: 70, easing: 'ease-out', fill: 'backwards' }));
 }
+// ---------- Pickers ----------
+// A <select> opens the system's old-style list on Android. Each one in a sheet gets a button that opens an
+// in-app menu instead; the hidden <select> still holds the value and fires `change`, so callers don't change.
+/** "High (recommended) · 300 DPI" → title "High", sub "recommended", meta "300 DPI"; "Sharp (lossless, larger)" → sub "lossless, larger". */
+function optionParts(text: string): { title: string; sub: string; meta: string } {
+  const [head, meta = ''] = text.split(' · ');
+  const m = /^(.*\S)\s*\(([^)]*)\)$/.exec(head);
+  return m ? { title: m[1], sub: m[2], meta } : { title: head, sub: '', meta };
+}
+/** What the closed picker shows: short enough for one line ("High · 300 DPI", "Auto (smallest file)"). */
+const pickLabel = (text: string) => { const { title, sub, meta } = optionParts(text); return meta ? `${title} · ${meta}` : sub ? `${title} (${sub})` : title; };
+const ICON_CHEV = '<svg class="ico" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg>';
+const ICON_TICK = '<svg class="ico" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+let closePicker: (() => void) | null = null;
+function enhanceSelects(root: ParentNode) {
+  root.querySelectorAll<HTMLSelectElement>('select:not([data-picker])').forEach((sel) => {
+    sel.dataset.picker = '1';
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'pick'; btn.setAttribute('aria-haspopup', 'listbox'); btn.setAttribute('aria-expanded', 'false');
+    const show = () => { btn.innerHTML = `<span>${esc(pickLabel(sel.selectedOptions[0]?.text ?? ''))}</span>${ICON_CHEV}`; };
+    show();
+    sel.before(btn); // first in its label, so tapping the label opens the menu
+    sel.addEventListener('change', show);
+    btn.onclick = (e) => { e.preventDefault(); openPicker(sel, btn); };
+  });
+}
+function openPicker(sel: HTMLSelectElement, btn: HTMLButtonElement) {
+  closePicker?.();
+  const catcher = document.createElement('div');
+  catcher.className = 'pick-catch';
+  const menu = document.createElement('div');
+  menu.className = 'pick-menu'; menu.setAttribute('role', 'listbox');
+  menu.innerHTML = [...sel.options].map((o, i) => {
+    const { title, sub, meta } = optionParts(o.text);
+    return `<button type="button" role="option" data-i="${i}" aria-selected="${o.selected}">
+      <span class="pt"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${meta ? `<span class="pm">${esc(meta)}</span>` : ''}<span class="pk">${o.selected ? ICON_TICK : ''}</span></button>`;
+  }).join('');
+  document.body.append(catcher, menu);
+  // Under the button, right-aligned to it; above it when there isn't room below.
+  const r = btn.getBoundingClientRect(), vw = innerWidth, vh = innerHeight;
+  const w = Math.min(vw - 24, Math.max(r.width, 300));
+  menu.style.width = `${w}px`;
+  menu.style.left = `${Math.max(12, Math.min(r.right - w, vw - 12 - w))}px`;
+  const h = menu.offsetHeight, below = r.bottom + 6 + h <= vh - 12;
+  menu.style.top = `${below ? r.bottom + 6 : Math.max(12, r.top - 6 - h)}px`;
+  menu.style.transformOrigin = below ? 'top right' : 'bottom right';
+  btn.setAttribute('aria-expanded', 'true');
+  if (!reduceMotion?.matches) menu.animate?.([{ opacity: 0, transform: 'scale(.92)' }, { opacity: 1, transform: 'none' }], { duration: 160, easing: 'cubic-bezier(.2, 0, 0, 1)' });
+  const done = () => {
+    if (closePicker !== done) return;
+    closePicker = null; btn.setAttribute('aria-expanded', 'false'); catcher.remove();
+    const a = reduceMotion?.matches ? null : menu.animate?.([{ opacity: 1 }, { opacity: 0, transform: 'scale(.96)' }], { duration: 110, easing: 'ease-in' });
+    if (a) a.onfinish = () => menu.remove(); else menu.remove();
+  };
+  closePicker = done;
+  catcher.onpointerdown = (e) => { e.preventDefault(); done(); };
+  menu.onclick = (e) => {
+    const o = (e.target as HTMLElement).closest<HTMLElement>('[data-i]');
+    if (!o) return;
+    const i = Number(o.dataset.i);
+    menu.querySelectorAll('[data-i]').forEach((b) => { b.setAttribute('aria-selected', String(b === o)); b.querySelector('.pk')!.innerHTML = b === o ? ICON_TICK : ''; });
+    if (sel.selectedIndex !== i) { sel.selectedIndex = i; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    setTimeout(done, 90); // let the tick show
+  };
+  menu.querySelector<HTMLElement>('[aria-selected="true"]')?.focus({ preventScroll: true });
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && closePicker) { e.stopPropagation(); closePicker(); } }, true);
+
 document.addEventListener('click', (e) => {
   const b = (e.target as HTMLElement).closest<HTMLElement>('[data-help]');
   const box = b?.closest('.sheet, #panel')?.querySelector<HTMLElement>(`[data-helpbox="${b.dataset.help}"]`);
@@ -1675,6 +1749,7 @@ function bindExportChoice(e: ExportPrefs, changed: () => void) {
   $('#x-dpi').onchange = () => { e.dpi = Number($<HTMLSelectElement>('#x-dpi').value); changed(); };
   $('#x-fmt').onchange = () => { e.compression = $<HTMLSelectElement>('#x-fmt').value as ExportPrefs['compression']; changed(); };
   $('#x-search').onchange = () => { e.searchable = $<HTMLInputElement>('#x-search').checked; changed(); };
+  enhanceSelects($('#x-image-opts'));
   show(true);
 }
 
