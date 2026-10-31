@@ -39,8 +39,10 @@ jobs:
       - name: Check committed app assets match the source
         run: |
           if ! git diff --quiet -- app/src/main/assets/web; then
-            echo "::warning::app/src/main/assets/web differs from a fresh build. Run 'npm run build:android' and commit."
+            # The APK ships these committed files, not a fresh build: stale ones mean the app runs old code.
+            echo "::error::app/src/main/assets/web differs from a fresh build. Run 'npm run build:android' and commit."
             git diff --stat -- app/src/main/assets/web
+            exit 1
           fi
       - name: Chinese font for the Chinese OCR test
         run: sudo apt-get install -y --no-install-recommends fonts-wqy-zenhei
@@ -85,21 +87,31 @@ jobs:
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
       - name: Build dev APK with emulator libraries
-        run: ./gradlew --no-daemon assembleDev -PwithX86
+        run: ./gradlew --no-daemon assembleDev -PwithX86 -PwebDebug
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Launch and watch for crashes
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: 35
           arch: x86_64
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: bash .github/scripts/smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: motion-check
+          path: motion/
+          if-no-files-found: ignore
+          retention-days: 14
   apk:
     name: Test APK
     needs: [test, smoke]
