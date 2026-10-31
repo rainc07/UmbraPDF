@@ -361,7 +361,12 @@ const imgHidden = await page.evaluate(() => document.querySelector('#x-image-opt
   const steps = ys.slice(1).map((y, i) => Math.abs(y - ys[i])).filter((x) => x > 0.05);
   check(steps.length >= 4 && Math.max(...steps.slice(-2)) <= 4, `motion: Image settings close with no jump at the end (last steps ${steps.slice(-3).map((x) => x.toFixed(1)).join(', ')})`);
 }
-await page.selectOption('#x-dpi', '150');
+// Quality is picked from the in-app menu (no system dropdown); Back closes the menu first.
+await page.click('#x-image-opts .pick >> nth=0'); await page.waitForTimeout(250);
+const menu = await page.evaluate(() => [...document.querySelectorAll('.pick-menu [role=option]')].map((o) => o.textContent.replace(/\s+/g, ' ').trim()));
+await page.click('.pick-menu [data-i="0"]'); await page.waitForTimeout(300);
+const picked = await page.evaluate(() => [document.querySelector('#x-dpi').value, document.querySelector('#x-image-opts .pick').textContent.trim(), !!document.querySelector('.pick-menu')]);
+check(menu.length === 5 && picked[0] === '150' && picked[1] === 'Small file · 150 DPI' && !picked[2], `picker: Quality menu lists 5 choices and sets the value (${JSON.stringify(menu)}, ${picked})`);
 await page.click('#s-close'); await page.waitForTimeout(250);
 await page.reload();
 await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
