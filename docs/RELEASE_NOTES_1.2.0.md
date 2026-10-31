@@ -3,11 +3,16 @@
 ## New
 - **Split into several files** (in Export): one file per page or every few pages, by page ranges (`1-3, 5, 8-`), or each page cut in half (left|right or top|bottom, with right-to-left and "wide pages only" options). It works with both "Keep original text" and "Image only". When a file has black boxes, the redacted copy is checked first and only that copy is split. On the phone you pick a folder; on the desktop it saves to a folder or one ZIP.
 - **Always redact** list in Settings: words or names that are boxed automatically in every file.
+- **Chinese text in scans** (Simplified and Traditional): turn on 中文 under the scan languages in Settings.
+- **Desktop app installer**: a Windows setup and portable ZIP, and a Linux package, attached to this release.
+- **Settings reorganised**: sections, a search box, (?) help on each option, and Export defaults.
 - **Auto compression**: scanned pages are saved as JPEG and clean pages stay lossless. A 3-page scan went from 22.1 MB to 3.6 MB.
 
 ## Faster
 - **Image only with searchable text** is much quicker. On a scan that already has a text layer (most scanner apps add one), pages without boxes reuse that text instead of reading the page again. Only words printed on the page are kept, and never anything near a box. A 21-page scanned agreement now exports in about 8 s on a desktop.
 - Typed pages and dense pages of print are no longer read twice (once as if they were an ID card).
+- Exports on the phone no longer stall while the screen is still.
+- Smoother panels and switches in Settings and Export, and a new dropdown that matches the app.
 - The technical report shows OCR timings per page, with a Copy button.
 
 ## Safety
