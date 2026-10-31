@@ -77,8 +77,10 @@ for (const t0 = Date.now(); cached < total && Date.now() - t0 < 180_000; await n
 check(cached >= total, `offline copy complete: ${cached}/${total} files`);
 await shot('1-home');
 
-// 2) No connection from here on.
-await ctx.setOffline(true);
+// 2) No connection from here on: the site is gone (stopping the server works the same in every engine; WebKit's
+// offline emulation fails navigations before the service worker can answer them).
+await new Promise((r) => { server.close(r); server.closeAllConnections(); });
+if (engine !== 'webkit') await ctx.setOffline(true);
 await page.reload();
 await page.waitForSelector('#splash.out', { state: 'attached', timeout: 30_000 });
 check(await page.evaluate(() => !!window.__umbraTest), 'opens with no connection');
@@ -117,6 +119,5 @@ check(shared?.[0]?.[0] === 'test-redacted.pdf' && shared[0][1] === r.bytes.lengt
 const bad = errors.filter((e) => !/Failed to load resource|net::ERR_INTERNET_DISCONNECTED/.test(e));
 check(bad.length === 0, `no page errors${bad.length ? `: ${bad.slice(0, 3).join(' | ')}` : ''}`);
 await browser.close();
-server.close();
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed');
 process.exit(failed ? 1 : 0);
