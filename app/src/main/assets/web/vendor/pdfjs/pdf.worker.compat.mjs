@@ -1,2 +1,2 @@
 import './compat.mjs';
-import './pdf.worker.min.mjs';
+export * from './pdf.worker.min.mjs';
