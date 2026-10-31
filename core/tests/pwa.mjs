@@ -50,6 +50,7 @@ await ctx.addInitScript(() => {
   } });
 });
 const page = await ctx.newPage();
+page.on('requestfailed', (r) => console.log(`diag  [${engine}] request failed: ${r.url()} ${r.failure()?.errorText}`));
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
@@ -82,7 +83,14 @@ await shot('1-home');
 await new Promise((r) => { server.close(r); server.closeAllConnections(); });
 if (engine !== 'webkit') await ctx.setOffline(true);
 await page.reload();
-await page.waitForSelector('#splash.out', { state: 'attached', timeout: 30_000 });
+// The app is up once the splash is fading out or gone (it is removed 0.4 s after).
+await page.waitForFunction(() => !!window.__umbraTest && !document.querySelector('#splash:not(.out)'), null, { timeout: 30_000 })
+  .catch(async (e) => {
+    console.log(`diag  [${engine}] url=${page.url()} errors=${JSON.stringify(errors)}`);
+    console.log(`diag  [${engine}] ${await page.evaluate(() => `ready=${document.readyState} sw=${!!navigator.serviceWorker?.controller} body=${document.body?.className}`).catch((x) => x.message)}`);
+    await shot('2-offline-failed');
+    throw e;
+  });
 check(await page.evaluate(() => !!window.__umbraTest), 'opens with no connection');
 await shot('2-offline');
 
