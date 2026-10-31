@@ -1,5 +1,5 @@
 # iPhone/iPad web app (installable, works offline): built from core/ into core/dist-pwa, tested in WebKit (Safari's
-# engine) and Chromium on an iPhone-sized phone, and published to GitHub Pages from main.
+# engine), Chromium and Firefox at iPhone size, and published to GitHub Pages from main.
 # Live at https://rainc07.github.io/UmbraPDF/
 name: iPhone web app
 
@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build + test (WebKit, Chromium)
+    name: Build + test (WebKit, Chromium, Firefox)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -35,13 +35,18 @@ jobs:
         run: npm ci && npm run build:pwa
       - name: Browsers
         working-directory: core
-        run: npx playwright-core install --with-deps webkit chromium
+        run: npx playwright-core install --with-deps webkit chromium firefox
       - name: Test in WebKit (Safari engine), iPhone 15
         working-directory: core
         run: SHOTS=shots node tests/pwa.mjs webkit
       - name: Test in Chromium, iPhone 15
+        if: success() || failure()
         working-directory: core
         run: SHOTS=shots node tests/pwa.mjs chromium
+      - name: Test in Firefox, iPhone-sized window
+        if: success() || failure()
+        working-directory: core
+        run: SHOTS=shots node tests/pwa.mjs firefox
       - uses: actions/upload-artifact@v4
         if: always()
         with:

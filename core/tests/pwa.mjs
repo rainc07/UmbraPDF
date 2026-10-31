@@ -1,13 +1,13 @@
 // Installable web app (iPhone/iPad): serves dist-pwa/ the way GitHub Pages does (a sub-path, no special headers)
 // and checks, on an iPhone-sized phone, that it installs, works with no connection, reads scanned text in the
 // browser (no server), exports a verified redacted copy and saves through the iOS share sheet.
-// Usage: npm run build:pwa && node tests/pwa.mjs [webkit|chromium]   (SHOTS=dir saves screenshots)
+// Usage: npm run build:pwa && node tests/pwa.mjs [webkit|chromium|firefox]   (SHOTS=dir saves screenshots)
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { resolve, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium, webkit, devices } from 'playwright-core';
+import { chromium, firefox, webkit, devices } from 'playwright-core';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../dist-pwa');
@@ -37,9 +37,11 @@ const url = `http://127.0.0.1:${server.address().port}${BASE}`;
 const sw = readFileSync(resolve(root, 'sw.js'), 'utf8');
 const total = JSON.parse(sw.match(/const CORE = (\[.*?\]);/)[1]).length + JSON.parse(sw.match(/const MORE = (\[.*?\]);/)[1]).length;
 
-const browser = engine === 'webkit' ? await webkit.launch()
+const browser = engine === 'webkit' ? await webkit.launch() : engine === 'firefox' ? await firefox.launch()
   : await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
-const ctx = await browser.newContext({ ...devices['iPhone 15'], serviceWorkers: 'allow' });
+// Firefox has no phone emulation (isMobile): same screen size and iPhone user agent, desktop otherwise.
+const { isMobile, hasTouch, ...phone } = devices['iPhone 15'];
+const ctx = await browser.newContext({ ...(engine === 'firefox' ? phone : devices['iPhone 15']), serviceWorkers: 'allow' });
 // The iOS share sheet: the first call has no fresh tap (NotAllowedError), so the app must ask for one more tap.
 await ctx.addInitScript(() => {
   let n = 0;
@@ -59,7 +61,9 @@ const page = await ctx.newPage();
 page.on('requestfailed', (r) => console.log(`diag  [${engine}] request failed: ${r.url()} ${r.failure()?.errorText}`));
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
-page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+const warnings = [];
+page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); else if (m.type() === 'warning') warnings.push(m.text()); });
+page.on('worker', (w) => w.on('console', (m) => { if (m.type() === 'error') errors.push(`worker ${w.url()}: ${m.text()}`); }));
 const shot = async (name) => { if (shots) { await mkdir(shots, { recursive: true }); await page.screenshot({ path: `${shots}/${engine}-${name}.png` }); } };
 
 // 1) Install: manifest, icons, service worker, offline copy.
@@ -84,10 +88,9 @@ for (const t0 = Date.now(); cached < total && Date.now() - t0 < 180_000; await n
 check(cached >= total, `offline copy complete: ${cached}/${total} files`);
 await shot('1-home');
 
-// 2) No connection from here on: the site is gone (stopping the server works the same in every engine; WebKit's
-// offline emulation fails navigations before the service worker can answer them).
+// 2) No connection from here on: the site is gone. (Stopping the server works the same in every engine; WebKit's
+// offline emulation fails navigations before the service worker can answer them.)
 await new Promise((r) => { server.close(r); server.closeAllConnections(); });
-if (engine !== 'webkit') await ctx.setOffline(true);
 await page.reload();
 // The app is up once the splash is fading out or gone (it is removed 0.4 s after).
 await page.waitForFunction(() => !!window.__umbraTest && !document.querySelector('#splash:not(.out)'), null, { timeout: 30_000 })
@@ -138,6 +141,10 @@ check(await saved === true, 'save: share sheet opens after one more tap');
 const shared = await page.evaluate(() => window.__shared);
 check(shared?.[0]?.[0] === 'test-redacted.pdf' && shared[0][1] === r.bytes.length && shared[0][2] === 'application/pdf', `save: PDF handed to the share sheet ${JSON.stringify(shared)}`);
 
+// Fallback when a browser can't start the worker: pdf.js loads the same file on the page instead.
+check(await page.evaluate(async () => typeof (await import(new URL('vendor/pdfjs/pdf.worker.compat.mjs', document.baseURI).href)).WorkerMessageHandler?.setup === 'function'),
+  'PDF engine fallback (no worker) can start');
+check(!warnings.some((w) => /fake worker/i.test(w)), `PDF engine runs in its worker${warnings.length ? ` (warnings: ${warnings.slice(0, 3).join(' | ')})` : ''}`);
 const bad = errors.filter((e) => !/Failed to load resource|net::ERR_INTERNET_DISCONNECTED/.test(e));
 check(bad.length === 0, `no page errors${bad.length ? `: ${bad.slice(0, 3).join(' | ')}` : ''}`);
 await browser.close();
