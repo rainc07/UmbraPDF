@@ -12,6 +12,8 @@ Download from the **[latest release](https://github.com/rainc07/UmbraPDF/release
 | Windows, no install | `UmbraPDF-<version>-Windows-Portable.zip` | Unzip and double-click **Umbra PDF.cmd**. |
 | **Linux** (x64) | `UmbraPDF-<version>-Linux.tar.gz` | Unpack and run `./umbra-pdf.sh`. |
 
+| **iPhone / iPad** | nothing: open **[rainc07.github.io/UmbraPDF](https://rainc07.github.io/UmbraPDF/)** in Safari | Tap **Share → Add to Home Screen → Add**. Open **Umbra** from the Home Screen once while online; after that it works with no connection. Save exports with **Save → Save to Files**. |
+
 Nothing else is needed (no Node.js, no git). Everything runs on your own device; the Windows/Linux version only answers
 this computer (`127.0.0.1`).
 
@@ -57,6 +59,7 @@ core/                     platform-agnostic web core (TypeScript, Vite)
   tests/e2e.mjs           Chromium end-to-end leak test
 app/                      Android shell (Kotlin, single WebView)
   src/main/assets/web/    built core (committed, so Android builds without Node)
+  pwa/, scripts/build-pwa.mjs  iPhone/iPad web app: manifest, icons, offline service worker (-> dist-pwa, GitHub Pages)
 web/                      desktop web app: local server (127.0.0.1 only) + native OCR (ONNX Runtime for Node)
 ```
 
@@ -70,7 +73,11 @@ npm ci
 npm run build:android   # tsc + vite build + vendor copy + sync into app assets
 npm test                # E2E leak test (needs Chromium; set CHROMIUM_PATH)
 npm run dev             # browser dev server
+npm run build:pwa       # iPhone/iPad web app into dist-pwa/; test: node tests/pwa.mjs webkit
 ```
+The iPhone/iPad web app is published to GitHub Pages from `main` by `.github/workflows/pwa.yml`, after its WebKit
+(Safari's engine) and Chromium tests pass. It reads text with the in-browser engine (PaddleOCR on ONNX Runtime Web,
+WebAssembly); nothing is uploaded.
 
 ## Desktop web app (Windows, macOS, Linux)
 The same app in your browser, served from your own computer only (127.0.0.1). Text in scanned pages is read by

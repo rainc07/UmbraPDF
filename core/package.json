@@ -10,7 +10,8 @@
     "test": "node tests/e2e.mjs && node tests/ui.mjs && node tests/still-screen.mjs && node tests/bench-cards.mjs --assert",
     "bench:cards": "node tests/bench-cards.mjs",
     "sync:android": "node scripts/sync-android.mjs",
-    "build:android": "npm run build && npm run sync:android"
+    "build:android": "npm run build && npm run sync:android",
+    "build:pwa": "npm run build && node scripts/build-pwa.mjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "1.0.0",
