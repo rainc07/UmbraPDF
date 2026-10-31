@@ -21,6 +21,37 @@ function download(name: string, bytes: Uint8Array, type: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+// iPhone/iPad Safari: no Save As dialog, and downloads from a Home Screen app are unreliable. The share sheet
+// ("Save to Files", AirDrop, Mail…) is the way to save there. It needs a fresh tap, which Save buttons give.
+const isAppleTouch = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+const fileList = (files: OpenedFile[], type: string) => files.map((f) => new File([f.bytes as BlobPart], f.name, { type }));
+function canShare(files: File[]): boolean {
+  try { return isAppleTouch() && !!navigator.canShare?.({ files }); } catch { return false; }
+}
+/** Share sheet: true if shared, false if the user closed it, null if it couldn't open (then download instead). */
+async function share(files: File[]): Promise<boolean | null> {
+  try { await navigator.share({ files }); return true; } catch (e) {
+    const n = (e as Error).name;
+    if (n === 'AbortError') return false;
+    if (n !== 'NotAllowedError') return null;
+  }
+  // The tap is too long ago: ask for one more tap, which opens the share sheet.
+  return new Promise((resolve) => {
+    const m = Object.assign(document.createElement('div'), { className: 'modal' });
+    m.style.zIndex = '11';
+    m.innerHTML = `<div class="sheet"><h2>Ready to save</h2><p class="hint">Tap Save, then choose "Save to Files" or an app.</p>
+      <div class="row"><button data-k="0">Cancel</button><button data-k="1" class="primary">Save</button></div></div>`;
+    document.body.append(m);
+    m.onclick = async (ev) => {
+      const k = (ev.target as HTMLElement).closest('button')?.dataset.k;
+      if (k === undefined) return;
+      m.remove();
+      if (k === '0') return resolve(false);
+      try { await navigator.share({ files }); resolve(true); } catch (e) { resolve((e as Error).name === 'AbortError' ? false : null); }
+    };
+  });
+}
+
 /** Plain browser host: the desktop web app (web/ server), the dev server and the tests. */
 export function createBrowserHost(): Host {
   useLocalServerOcr();
@@ -41,6 +72,8 @@ export function createBrowserHost(): Host {
         input.click();
       }),
     savePdf: async (name, bytes) => {
+      const f = fileList([{ name, bytes }], 'application/pdf');
+      if (canShare(f)) { const r = await share(f); if (r !== null) return r; }
       // A real Save As dialog where the browser has one (Chrome, Edge); otherwise a download.
       const pick = (window as unknown as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
       if (pick) {
@@ -59,6 +92,8 @@ export function createBrowserHost(): Host {
       return true;
     },
     saveFiles: async (zipName, files) => {
+      const fl = fileList(files, 'application/pdf');
+      if (canShare(fl)) { const r = await share(fl); if (r !== null) return r && files.length; }
       // Chrome, Edge: save into a folder the user picks. Existing files are never overwritten ("name (2).pdf").
       const pickDir = (window as unknown as { showDirectoryPicker?: DirPicker }).showDirectoryPicker;
       if (pickDir) {

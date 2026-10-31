@@ -35,3 +35,4 @@ samples/for OCR.pdf
 /web/dist
 /web/.cache
 /web/release
+/core/dist-pwa

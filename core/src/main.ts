@@ -2068,6 +2068,7 @@ syncToolbar();
 // Automation hook for E2E tests (no I/O; operates on in-memory state only).
 (window as unknown as { __umbraTest: unknown }).__umbraTest = {
   load: (bytes: Uint8Array, name = 'test.pdf') => loadFile({ name, bytes }),
+  savePdf: (name: string, bytes: Uint8Array) => host.savePdf(name, bytes),
   setBoxes: (boxes: Rect[][]) => { S.boxes = boxes.map((b) => [...b]); S.sizes.forEach((_, i) => drawBoxes(i)); },
   sizes: () => S.sizes,
   export: (opts: Partial<ExportOptions> = {}, ocr = false, method: 'vector' | 'image' = 'image') => runExport({ ...DEFAULT_EXPORT, ...opts }, ocr, () => {}, method),
