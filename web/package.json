@@ -1,6 +1,6 @@
 {
   "name": "umbra-web",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "Umbra PDF for the desktop: the web core served on this computer, with native OCR (ONNX Runtime for Node).",
