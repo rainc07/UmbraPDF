@@ -16,6 +16,9 @@ const copy = (src, dst, opts = {}) => {
 
 // pdf.js
 copy('pdfjs-dist/legacy/build/pdf.worker.min.mjs', 'pdfjs/pdf.worker.min.mjs');
+// Loaded as the worker: Safari fill-ins first (src/compat.js), then pdf.js.
+cpSync(resolve(root, 'src/compat.js'), out('pdfjs/compat.mjs'));
+writeFileSync(out('pdfjs/pdf.worker.compat.mjs'), "import './compat.mjs';\nimport './pdf.worker.min.mjs';\n");
 copy('pdfjs-dist/cmaps', 'pdfjs/cmaps');
 copy('pdfjs-dist/standard_fonts', 'pdfjs/standard_fonts');
 copy('pdfjs-dist/iccs', 'pdfjs/iccs');

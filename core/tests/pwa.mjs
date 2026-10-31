@@ -49,6 +49,12 @@ await ctx.addInitScript(() => {
     window.__shared = d.files.map((f) => [f.name, f.size, f.type]);
   } });
 });
+// Chromium plays an older Safari: no async iteration of streams, no iterator helpers (the app fills them in).
+if (engine !== 'webkit') await ctx.addInitScript(() => {
+  delete ReadableStream.prototype[Symbol.asyncIterator];
+  const proto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+  for (const k of ['map', 'filter', 'flatMap', 'take', 'drop', 'some', 'every', 'find', 'forEach', 'toArray', 'reduce']) delete proto[k];
+});
 const page = await ctx.newPage();
 page.on('requestfailed', (r) => console.log(`diag  [${engine}] request failed: ${r.url()} ${r.failure()?.errorText}`));
 const errors = [];
@@ -116,6 +122,14 @@ check(r.text.trim().length > 40 && /public/i.test(r.text), `scanned page read of
 check(r.hits >= 1, `search on scanned page finds "public" (${r.hits})`);
 check(r.ok, `redacted export verified (${r.issues.join('; ') || 'no issues'})`);
 await shot('3-document');
+
+// 3b) A typed (text) PDF: page text straight from the file, no OCR.
+const typed = await page.evaluate(async (b) => {
+  const T = window.__umbraTest;
+  await T.load(new Uint8Array(b));
+  return T.pageText(0);
+}, Array.from(readFileSync(resolve(here, '../../samples/umbra-test-text.pdf'))));
+check(typed.trim().length > 20, `typed PDF text read (${JSON.stringify(typed.trim().slice(0, 60))})`);
 
 // 4) Saving on iPhone: share sheet, with the extra tap when the first one is too old.
 const saved = page.evaluate((b) => window.__umbraTest.savePdf('test-redacted.pdf', new Uint8Array(b)), r.bytes);

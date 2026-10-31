@@ -1,3 +1,4 @@
+import './compat.js'; // first: fill-ins for older Safari
 import './ui/styles.css';
 import {
   openPdf, closePdf, pageSizes, renderToCanvas, exportRedacted, verifyOutput, ocrRedactedRegions,

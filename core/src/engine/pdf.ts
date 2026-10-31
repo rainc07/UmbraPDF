@@ -3,7 +3,7 @@ import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist/types/src/displa
 import { vendorUrl } from './paths';
 import type { PageSize } from './types';
 
-pdfjs.GlobalWorkerOptions.workerSrc = vendorUrl('pdfjs/pdf.worker.min.mjs');
+pdfjs.GlobalWorkerOptions.workerSrc = vendorUrl('pdfjs/pdf.worker.compat.mjs');
 
 export type { PDFDocumentProxy, PDFPageProxy };
 export const AnnotationMode = pdfjs.AnnotationMode;
