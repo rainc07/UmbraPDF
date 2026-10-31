@@ -20,8 +20,13 @@ let failed = 0;
 const check = (cond, msg) => { console.log(`${cond ? 'PASS' : 'FAIL'}  [${engine}] ${msg}`); if (!cond) failed++; };
 
 const BASE = '/UmbraPDF/';
+const served = []; // every request the "website" receives: [method, path, body bytes]
 const server = createServer(async (req, res) => {
+  let size = 0;
+  for await (const c of req) size += c.length;
+  served.push([req.method, decodeURIComponent(new URL(req.url, 'http://x').pathname), size]);
   try {
+    if (req.method !== 'GET') throw 0;
     let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (!p.startsWith(BASE)) throw 0;
     p = resolve(root, '.' + p.slice(BASE.length - 1).replace(/\/$/, '/index.html'));
@@ -35,7 +40,9 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const url = `http://127.0.0.1:${server.address().port}${BASE}`;
 
 const sw = readFileSync(resolve(root, 'sw.js'), 'utf8');
-const total = JSON.parse(sw.match(/const CORE = (\[.*?\]);/)[1]).length + JSON.parse(sw.match(/const MORE = (\[.*?\]);/)[1]).length;
+const appFiles = [...JSON.parse(sw.match(/const CORE = (\[.*?\]);/)[1]), ...JSON.parse(sw.match(/const MORE = (\[.*?\]);/)[1])];
+const total = appFiles.length;
+const known = new Set([BASE, `${BASE}sw.js`, ...appFiles.map((f) => BASE + f)]);
 
 const browser = engine === 'webkit' ? await webkit.launch() : engine === 'firefox' ? await firefox.launch()
   : await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
@@ -57,6 +64,8 @@ if (engine !== 'webkit') await ctx.addInitScript(() => {
   const proto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
   for (const k of ['map', 'filter', 'flatMap', 'take', 'drop', 'some', 'every', 'find', 'forEach', 'toArray', 'reduce']) delete proto[k];
 });
+const elsewhere = []; // anything the browser asks of another site (must stay empty)
+ctx.on('request', (r) => { const u = new URL(r.url()); if (!/^(blob|data):/.test(u.protocol) && u.host !== new URL(url).host) elsewhere.push(`${r.method()} ${u.href}`); });
 const page = await ctx.newPage();
 page.on('requestfailed', (r) => console.log(`diag  [${engine}] request failed: ${r.url()} ${r.failure()?.errorText}`));
 const errors = [];
@@ -88,6 +97,30 @@ for (const t0 = Date.now(); cached < total && Date.now() - t0 < 180_000; await n
 check(cached >= total, `offline copy complete: ${cached}/${total} files`);
 await shot('1-home');
 
+// 1b) Privacy, online: open a scanned PDF, read it (OCR), Auto Detect, redact, export and save. The website must
+// receive nothing but plain downloads of the app's own files (in practice nothing: they are all cached by now).
+const scanPdf = readFileSync(resolve(here, '../../samples/umbra-test-scanned.pdf'));
+const mark = served.length;
+const online = await page.evaluate(async (b) => {
+  const T = window.__umbraTest;
+  await T.load(new Uint8Array(b), 'private.pdf');
+  await T.pageText(0);
+  const hits = await T.detect(['nric', 'phone', 'email', 'card', 'passport']);
+  T.applyAll();
+  const ex = await T.export({ dpi: 150, searchable: true }, true);
+  return { hits: hits.length, ok: ex.report.ok, bytes: Array.from(ex.bytes) };
+}, Array.from(scanPdf));
+const saving = page.evaluate((b) => window.__umbraTest.savePdf('private-redacted.pdf', new Uint8Array(b)), online.bytes);
+await page.getByRole('button', { name: 'Save', exact: true }).click({ timeout: 10_000 });
+await saving;
+await page.evaluate(() => { window.__shared = null; }); // the share-sheet stub counts calls: reset for step 4
+const during = served.slice(mark);
+check(online.hits >= 3 && online.ok, `online: Auto Detect found ${online.hits} items, export verified`);
+check(during.every(([m, p, n]) => m === 'GET' && n === 0 && known.has(p)),
+  `privacy: while opening, reading, detecting and exporting, the website got only app-file downloads (${during.length} requests${during.length ? `: ${during.map((x) => x.join(' ')).slice(0, 5).join(', ')}` : ''})`);
+check(served.every(([m, p, n]) => m === 'GET' && n === 0 && (known.has(p) || p === `${BASE}index.html` || /favicon\.ico$/.test(p))),
+  `privacy: the website never received an upload or any request other than its own files (${served.length} requests in all${served.filter(([m, p, n]) => !(m === 'GET' && n === 0 && known.has(p))).map((x) => `; ${x.join(' ')}`).join('')})`);
+
 // 2) No connection from here on: the site is gone. (Stopping the server works the same in every engine; WebKit's
 // offline emulation fails navigations before the service worker can answer them.)
 await new Promise((r) => { server.close(r); server.closeAllConnections(); });
@@ -102,6 +135,23 @@ await page.waitForFunction(() => !!window.__umbraTest && !document.querySelector
   });
 check(await page.evaluate(() => !!window.__umbraTest), 'opens with no connection');
 await shot('2-offline');
+
+// 2b) Settings stay as the user left them: change two in the Settings screen, reopen the app, check.
+await page.click('#btn-settings');
+await page.click('[data-theme-opt="dark"]');
+await page.locator('#s-adv').check({ force: true });
+await page.waitForTimeout(600);
+await page.reload();
+await page.waitForFunction(() => !!window.__umbraTest && !document.querySelector('#splash:not(.out)'), null, { timeout: 30_000 });
+const kept = await page.evaluate(() => document.documentElement.dataset.theme);
+await page.click('#btn-settings');
+const pressed = await page.getAttribute('[data-theme-opt="dark"]', 'aria-pressed');
+const adv = await page.locator('#s-adv').isChecked();
+check(kept === 'dark' && pressed === 'true' && adv, `settings kept after reopening the app (theme ${kept}, dark selected ${pressed}, technical report ${adv})`);
+await page.keyboard.press('Escape');
+await page.evaluate(() => { localStorage.removeItem('umbra.prefs.v1'); });
+await page.reload();
+await page.waitForFunction(() => !!window.__umbraTest && !document.querySelector('#splash:not(.out)'), null, { timeout: 30_000 });
 
 // 3) Scanned page read in the browser (PaddleOCR on WebAssembly), redacted and verified, offline.
 const scan = readFileSync(resolve(here, '../../samples/umbra-test-scanned.pdf'));
@@ -145,6 +195,7 @@ check(shared?.[0]?.[0] === 'test-redacted.pdf' && shared[0][1] === r.bytes.lengt
 check(await page.evaluate(async () => typeof (await import(new URL('vendor/pdfjs/pdf.worker.compat.mjs', document.baseURI).href)).WorkerMessageHandler?.setup === 'function'),
   'PDF engine fallback (no worker) can start');
 check(!warnings.some((w) => /fake worker/i.test(w)), `PDF engine runs in its worker${warnings.length ? ` (warnings: ${warnings.slice(0, 3).join(' | ')})` : ''}`);
+check(elsewhere.length === 0, `privacy: no request to any other site (${elsewhere.slice(0, 5).join(', ') || 'none'})`);
 const bad = errors.filter((e) => !/Failed to load resource|net::ERR_INTERNET_DISCONNECTED/.test(e));
 check(bad.length === 0, `no page errors${bad.length ? `: ${bad.slice(0, 3).join(' | ')}` : ''}`);
 await browser.close();
