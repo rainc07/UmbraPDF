@@ -822,7 +822,10 @@ function openPicker(sel: HTMLSelectElement, btn: HTMLButtonElement) {
     if (a) a.onfinish = () => menu.remove(); else menu.remove();
   };
   closePicker = done;
-  catcher.onpointerdown = (e) => { e.preventDefault(); done(); };
+  // Closes on the tap's click, which the catcher swallows: closing on pointerdown let the click through to
+  // the picker's own button underneath, which opened the menu again.
+  catcher.onpointerdown = (e) => e.preventDefault();
+  catcher.onclick = (e) => { e.preventDefault(); e.stopPropagation(); done(); };
   menu.onclick = (e) => {
     const o = (e.target as HTMLElement).closest<HTMLElement>('[data-i]');
     if (!o) return;
@@ -935,7 +938,8 @@ function settingsDialog() {
   const seg = (v: ThemePref, l: string) => `<button data-theme-opt="${v}" aria-pressed="${prefs.theme === v}">${l}</button>`;
   const optItems = (keys: (keyof Options)[]) => keys.filter((k) => k !== 'hideRecents' || host.name === 'android')
     .map((k) => `<div class="sitem">${optRows([k])}</div>`).join('');
-  modal(`<div class="ssearch"><h2>Settings</h2><input id="s-search" type="search" placeholder="Search settings" autocomplete="off" spellcheck="false" enterkeyhint="search" aria-label="Search settings"></div>
+  // Laid out like Export (a full-height sheet, `fill`): only the content moves when a section opens or closes.
+  modal(`<div class="fillbody"><div class="ssearch"><h2>Settings</h2><input id="s-search" type="search" placeholder="Search settings" autocomplete="off" spellcheck="false" enterkeyhint="search" aria-label="Search settings"></div>
     <p class="hint" id="s-none" hidden>No settings match.</p>
     <section class="sset"><h3>Appearance</h3>
     <div class="sitem" data-k="theme dark light mode night colour color"><div class="segctl">${seg('system', 'System')}${seg('light', 'Light')}${seg('dark', 'Dark')}</div></div></section>
@@ -955,8 +959,8 @@ function settingsDialog() {
     <section class="sset"><h3>Advanced</h3>
     <div class="sitem" data-k="debug">${row2('Show technical check report', `<input id="s-adv" class="switch" type="checkbox" ${prefs.advanced ? 'checked' : ''}>`, 'adv', 'For IT and troubleshooting. The safety check always runs either way.')}</div></section>
     <section class="sset"><h3>About</h3>
-    <div class="sitem" data-k="version licence privacy"><p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p></div></section>
-    <div class="row"><button id="s-close" class="primary">Done</button></div>`, true);
+    <div class="sitem" data-k="version licence privacy"><p class="hint">Umbra PDF works fully offline. Your files never leave this device. Open source under GPL-3.0.</p></div></section></div>
+    <div class="row"><button id="s-close" class="primary">Done</button></div>`, true, null, true);
   // The title and search stay on top; a line under them once the list scrolls beneath.
   const sheet = $('#sheet'), head = $('.ssearch');
   sheet.onscroll = () => head.classList.toggle('stuck', sheet.scrollTop > 4);
@@ -978,7 +982,9 @@ function settingsDialog() {
     });
     slide($('#s-none'), !any);
   };
-  bindExportChoice(prefs.export, () => savePrefs());
+  // Saved once the slide has finished: the save crosses to Android, which can cost the slide's first frame.
+  let saveLater = 0;
+  bindExportChoice(prefs.export, () => { clearTimeout(saveLater); saveLater = window.setTimeout(savePrefs, 400); });
   $('#sheet').querySelectorAll<HTMLButtonElement>('[data-theme-opt]').forEach((b) => {
     b.onclick = () => {
       prefs.theme = b.dataset.themeOpt as ThemePref; savePrefs(); applyTheme();
