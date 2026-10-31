@@ -22,6 +22,8 @@ async function run(fn, ...args) {
   return d.result?.result?.value;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// CPU_THROTTLE=4: run the page 4x slower (local runs, to see which slides drop frames on a busy phone).
+if (process.env.CPU_THROTTLE) await send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.CPU_THROTTLE) });
 /** Waits until `sel` exists (and is enabled); otherwise fails with what's on screen. */
 async function waitFor(sel, ms = 15000) {
   for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200))

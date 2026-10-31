@@ -367,6 +367,15 @@ const menu = await page.evaluate(() => [...document.querySelectorAll('.pick-menu
 await page.click('.pick-menu [data-i="0"]'); await page.waitForTimeout(300);
 const picked = await page.evaluate(() => [document.querySelector('#x-dpi').value, document.querySelector('#x-image-opts .pick').textContent.trim(), !!document.querySelector('.pick-menu')]);
 check(menu.length === 5 && picked[0] === '150' && picked[1] === 'Small file · 150 DPI' && !picked[2], `picker: Quality menu lists 5 choices and sets the value (${JSON.stringify(menu)}, ${picked})`);
+{
+  // A second tap (touch, as on a phone) on the picker's button closes the menu; it doesn't reopen.
+  const b = await page.evaluate(() => { const r = document.querySelector('#x-image-opts .pick').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; });
+  await page.touchscreen.tap(b[0], b[1]); await page.waitForTimeout(300);
+  const open1 = await page.evaluate(() => !!document.querySelector('.pick-menu'));
+  await page.touchscreen.tap(b[0], b[1]); await page.waitForTimeout(400);
+  const open2 = await page.evaluate(() => !!document.querySelector('.pick-menu'));
+  check(open1 && !open2, `picker: tapping its button again closes the menu (${open1}, ${open2})`);
+}
 await page.click('#s-close'); await page.waitForTimeout(250);
 await page.reload();
 await page.waitForFunction(() => !document.getElementById('splash'), null, { timeout: 10000 });
